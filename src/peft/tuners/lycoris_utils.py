@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023-present the HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +17,7 @@ from __future__ import annotations
 import warnings
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Type, Union
 
 import torch
 import torch.nn as nn
@@ -28,7 +29,7 @@ from peft.utils import (
     _get_submodules,
 )
 
-from .tuners_utils import BaseTuner, BaseTunerLayer, check_adapters_to_merge, check_target_module_exists
+from .tuners_utils import BaseTuner, BaseTunerLayer, check_target_module_exists
 
 
 @dataclass
@@ -79,7 +80,7 @@ class LycorisLayer(BaseTunerLayer):
 
     @property
     @abstractmethod
-    def _available_adapters(self) -> set[str]:
+    def _available_adapters(self) -> Set[str]:
         ...
 
     def _init_empty_weights(self, cls, *args, **kwargs) -> None:
@@ -107,7 +108,7 @@ class LycorisLayer(BaseTunerLayer):
     def get_delta_weight(self, adapter_name: str) -> torch.Tensor:
         ...
 
-    def merge(self, safe_merge: bool = False, adapter_names: Optional[list[str]] = None) -> None:
+    def merge(self, safe_merge: bool = False, adapter_names: Optional[List[str]] = None) -> None:
         """
         Merge the active adapter weights into the base weights
 
@@ -120,16 +121,20 @@ class LycorisLayer(BaseTunerLayer):
                 The list of adapter names that should be merged. If `None`, all active adapters will be merged.
                 Defaults to `None`.
         """
-        adapter_names = check_adapters_to_merge(self, adapter_names)
-        if not adapter_names:
-            # no adapter to merge
-            return
+        if self.merged:
+            warnings.warn(
+                f"Already following adapters were merged {','.join(self.merged_adapters)}. "
+                f"You are now additionally merging {','.join(self.active_adapters)}."
+            )
+        if adapter_names is None:
+            adapter_names = self.active_adapters
 
         for active_adapter in adapter_names:
             if active_adapter in self._available_adapters:
                 base_layer = self.get_base_layer()
+
                 if safe_merge:
-                    orig_weights = base_layer.weight.data.clone()
+                    orig_weights = base_layer.weight.data
                     orig_weights += self.get_delta_weight(active_adapter)
 
                     if not torch.isfinite(orig_weights).all():
@@ -195,7 +200,7 @@ class LycorisTuner(BaseTuner):
     """
 
     prefix: str
-    layers_mapping: dict[type[torch.nn.Module], type[LycorisLayer]]
+    layers_mapping: Dict[Type[torch.nn.Module], Type[LycorisLayer]]
 
     def __init__(self, model, config, adapter_name):
         super().__init__(model, config, adapter_name)
@@ -220,6 +225,7 @@ class LycorisTuner(BaseTuner):
         target_name,
         parent,
         current_key,
+        **optional_kwargs,
     ):
         ...
 
@@ -309,7 +315,7 @@ class LycorisTuner(BaseTuner):
         merge: bool = True,
         progressbar: bool = False,
         safe_merge: bool = False,
-        adapter_names: Optional[list[str]] = None,
+        adapter_names: Optional[List[str]] = None,
     ):
         if merge:
             if getattr(self.model, "quantization_method", None) == "gptq":
@@ -330,13 +336,7 @@ class LycorisTuner(BaseTuner):
                 self._replace_module(parent, target_name, target.get_base_layer(), target)
             elif isinstance(target, ModulesToSaveWrapper):
                 # save any additional trainable modules part of `modules_to_save`
-                new_module = target.modules_to_save[target.active_adapter]
-                if hasattr(new_module, "base_layer"):
-                    # check if the module is itself a tuner layer
-                    if merge:
-                        new_module.merge(safe_merge=safe_merge, adapter_names=adapter_names)
-                    new_module = new_module.get_base_layer()
-                setattr(parent, target_name, new_module)
+                setattr(parent, target_name, target.modules_to_save[target.active_adapter])
 
         return self.model
 
@@ -355,7 +355,7 @@ class LycorisTuner(BaseTuner):
         self._set_adapter_layers(enabled=False)
 
     def merge_and_unload(
-        self, progressbar: bool = False, safe_merge: bool = False, adapter_names: Optional[list[str]] = None
+        self, progressbar: bool = False, safe_merge: bool = False, adapter_names: Optional[List[str]] = None
     ) -> torch.nn.Module:
         r"""
         This method merges the adapter layers into the base model. This is needed if someone wants to use the base
@@ -385,15 +385,6 @@ class LycorisTuner(BaseTuner):
 
     def set_adapter(self, adapter_name: str | list[str]) -> None:
         """Set the active adapter(s).
-
-        Additionally, this function will set the specified adapters to trainable (i.e., requires_grad=True). If this is
-        not desired, use the following code.
-
-        ```py
-        >>> for name, param in model_peft.named_parameters():
-        ...     if ...:  # some check on name (ex. if 'lora' in name)
-        ...         param.requires_grad = False
-        ```
 
         Args:
             adapter_name (`str` or `list[str]`): Name of the adapter(s) to be activated.

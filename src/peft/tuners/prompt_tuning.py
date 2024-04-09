@@ -13,11 +13,54 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import enum
 import math
+from dataclasses import dataclass, field
+from typing import Optional, Union
 
 import torch
 
-from .config import PromptTuningInit
+from ..config import PromptLearningConfig
+from ..utils import PeftType
+
+
+class PromptTuningInit(str, enum.Enum):
+    TEXT = "TEXT"
+    RANDOM = "RANDOM"
+
+
+@dataclass
+class PromptTuningConfig(PromptLearningConfig):
+    """
+    This is the configuration class to store the configuration of a [`PromptEmbedding`].
+
+    Args:
+        prompt_tuning_init (Union[[`PromptTuningInit`], `str`]): The initialization of the prompt embedding.
+        prompt_tuning_init_text (`str`, *optional*):
+            The text to initialize the prompt embedding. Only used if `prompt_tuning_init` is `TEXT`.
+        tokenizer_name_or_path (`str`, *optional*):
+            The name or path of the tokenizer. Only used if `prompt_tuning_init` is `TEXT`.
+    """
+
+    prompt_tuning_init: Union[PromptTuningInit, str] = field(
+        default=PromptTuningInit.RANDOM,
+        metadata={"help": "How to initialize the prompt tuning parameters"},
+    )
+    prompt_tuning_init_text: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "The text to use for prompt tuning initialization. Only used if prompt_tuning_init is `TEXT`"
+        },
+    )
+    tokenizer_name_or_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "The tokenizer to use for prompt tuning initialization. Only used if prompt_tuning_init is `TEXT`"
+        },
+    )
+
+    def __post_init__(self):
+        self.peft_type = PeftType.PROMPT_TUNING
 
 
 class PromptEmbedding(torch.nn.Module):
@@ -66,8 +109,7 @@ class PromptEmbedding(torch.nn.Module):
         if config.prompt_tuning_init == PromptTuningInit.TEXT:
             from transformers import AutoTokenizer
 
-            tokenizer_kwargs = config.tokenizer_kwargs or {}
-            tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name_or_path, **tokenizer_kwargs)
+            tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name_or_path)
             init_text = config.prompt_tuning_init_text
             init_token_ids = tokenizer(init_text)["input_ids"]
             # Trim or iterate until num_text_tokens matches total_virtual_tokens
@@ -78,9 +120,8 @@ class PromptEmbedding(torch.nn.Module):
                 num_reps = math.ceil(total_virtual_tokens / num_text_tokens)
                 init_token_ids = init_token_ids * num_reps
             init_token_ids = init_token_ids[:total_virtual_tokens]
-            init_token_ids = torch.LongTensor(init_token_ids).to(word_embeddings.weight.device)
 
-            word_embedding_weights = word_embeddings(init_token_ids).detach().clone()
+            word_embedding_weights = word_embeddings(torch.LongTensor(init_token_ids)).detach().clone()
             word_embedding_weights = word_embedding_weights.to(torch.float32)
             self.embedding.weight = torch.nn.Parameter(word_embedding_weights)
 

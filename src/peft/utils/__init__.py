@@ -18,7 +18,6 @@
 # limitations under the License.
 
 # from .config import PeftConfig, PeftType, PromptLearningConfig, TaskType
-from .loftq_utils import replace_lora_weights_loftq
 from .peft_types import PeftType, TaskType
 from .other import (
     TRANSFORMERS_MODELS_TO_PREFIX_TUNING_POSTPROCESS_MAPPING,
@@ -26,12 +25,14 @@ from .other import (
     TRANSFORMERS_MODELS_TO_ADALORA_TARGET_MODULES_MAPPING,
     TRANSFORMERS_MODELS_TO_IA3_TARGET_MODULES_MAPPING,
     TRANSFORMERS_MODELS_TO_IA3_FEEDFORWARD_MODULES_MAPPING,
+    COMMON_LAYERS_PATTERN,
     CONFIG_NAME,
     WEIGHTS_NAME,
     SAFETENSORS_WEIGHTS_NAME,
-    INCLUDE_LINEAR_LAYERS_SHORTHAND,
+    TRANSFORMERS_MODELS_TO_ADAMIX_TARGET_MODULES_MAPPING,
     _set_trainable,
     bloom_model_postprocess_past_key_value,
+    prepare_model_for_int8_training,
     prepare_model_for_kbit_training,
     shift_tokens_right,
     transpose,
@@ -46,6 +47,5 @@ from .other import (
     get_auto_gptq_quant_linear,
     get_quantization_config,
     id_tensor_storage,
-    cast_mixed_precision_params,
 )
 from .save_and_load import get_peft_model_state_dict, set_peft_model_state_dict, load_peft_weights

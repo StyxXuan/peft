@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023-present the HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -109,22 +110,24 @@ class AdaLoraModel(LoraModel):
         target,
         target_name,
         parent,
-        current_key,
+        **optional_kwargs,
     ):
+        loaded_in_8bit = optional_kwargs.get("loaded_in_8bit", False)
+        loaded_in_4bit = optional_kwargs.get("loaded_in_4bit", False)
+        if (loaded_in_8bit or loaded_in_4bit) and not is_bnb_available():
+            raise ImportError(
+                "To use AdaLora with 8-bit quantization, please install the `bitsandbytes` package. "
+                "You can install it with `pip install bitsandbytes`."
+            )
         kwargs = {
             "r": lora_config.init_r,
             "lora_alpha": lora_config.lora_alpha,
             "lora_dropout": lora_config.lora_dropout,
             "fan_in_fan_out": lora_config.fan_in_fan_out,
             "init_lora_weights": lora_config.init_lora_weights,
-            "loaded_in_8bit": getattr(self.model, "is_loaded_in_8bit", False),
-            "loaded_in_4bit": getattr(self.model, "is_loaded_in_4bit", False),
+            "loaded_in_8bit": loaded_in_8bit,
+            "loaded_in_4bit": loaded_in_4bit,
         }
-        if (kwargs["loaded_in_8bit"] or kwargs["loaded_in_4bit"]) and not is_bnb_available():
-            raise ImportError(
-                "To use AdaLora with 8-bit quantization, please install the `bitsandbytes` package. "
-                "You can install it with `pip install bitsandbytes`."
-            )
 
         quantization_config = get_quantization_config(self.model, method="gptq")
         if quantization_config is not None:
@@ -245,7 +248,7 @@ class AdaLoraModel(LoraModel):
             for n, p in self.model.named_parameters():
                 if ("lora_A" in n or "lora_B" in n) and self.trainable_adapter_name in n:
                     para_cov = p @ p.T if "lora_A" in n else p.T @ p
-                    I = torch.eye(*para_cov.size(), out=torch.empty_like(para_cov))  # noqa: E741
+                    I = torch.eye(*para_cov.size(), out=torch.empty_like(para_cov))
                     I.requires_grad = False
                     num_param += 1
                     regu_loss += torch.norm(para_cov - I, p="fro")
@@ -265,7 +268,7 @@ class AdaLoraModel(LoraModel):
                 rank_idx = rank_idx.view(-1)
                 rank = rank_idx.sum().item()
             else:
-                raise ValueError("Unexpected type of rank_idx")
+                raise ValueError("Unexcepted type of rank_idx")
             key = ".".join(name.split(".")[0:-2]) if adapter_name in name else ".".join(name.split(".")[0:-1])
             _, target, _ = _get_submodules(self.model, key)
             lora_E_weights = target.lora_E[adapter_name][rank_idx]
@@ -304,26 +307,6 @@ class AdaLoraModel(LoraModel):
         return state_dict
 
     def update_and_allocate(self, global_step):
-        """
-        This method updates Adalora budget and mask.
-
-        This should be called in every training step after `loss.backward()` and before `zero_grad()`.
-
-        `tinit`, `tfinal` and `deltaT` are handled with in the method.
-
-        Args:
-            global_step (`int`): The current training step, it is used to calculate adalora budget.
-
-        Example:
-
-        ```python
-        >>> loss = model(**input).loss
-        >>> loss.backward()
-        >>> optimizer.step()
-        >>> model.base_model.update_and_allocate(i_step)
-        >>> optimizer.zero_grad()
-        ```
-        """
         lora_config = self.peft_config[self.trainable_adapter_name]
         # Update the importance score and allocate the budget
         if global_step < lora_config.total_step - lora_config.tfinal:

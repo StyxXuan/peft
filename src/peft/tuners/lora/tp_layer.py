@@ -1,26 +1,8 @@
-# Copyright 2023-present the HuggingFace Inc. team.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-import importlib
-import warnings
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.nn as nn
 import torch.nn.init as init
-
-from peft.tuners.tuners_utils import BaseTunerLayer
 
 from .layer import LoraLayer
 
@@ -44,17 +26,13 @@ class LoraParallelLinear(nn.Module, LoraLayer):
         fan_in_fan_out: bool = False,
         init_lora_weights: bool = True,
         use_rslora: bool = False,
-        use_dora: bool = False,
         **kwargs,
     ):
         super().__init__()
         LoraLayer.__init__(self, base_layer=base_layer)
 
-        if use_dora:
-            raise ValueError(f"{self.__class__.__name__} does not support DoRA yet, please set it to False")
-
         self.backend = backend
-        self.is_parallel_a = isinstance(base_layer, backend.RowParallelLinear)
+        self.is_paralle_a = isinstance(base_layer, backend.RowParallelLinear)
         self.fan_in_fan_out = fan_in_fan_out
         self._active_adapter = adapter_name
 
@@ -72,14 +50,13 @@ class LoraParallelLinear(nn.Module, LoraLayer):
         self.update_layer(
             adapter_name,
             r,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-            init_lora_weights=init_lora_weights,
-            use_rslora=use_rslora,
-            use_dora=use_dora,
-            init_method=init_method,
-            input_is_parallel=input_is_parallel,
-            gather_output=gather_output,
+            lora_alpha,
+            lora_dropout,
+            init_lora_weights,
+            use_rslora,
+            init_method,
+            input_is_parallel,
+            gather_output,
             **parallel_linear_kwargs,
         )
 
@@ -93,7 +70,6 @@ class LoraParallelLinear(nn.Module, LoraLayer):
         lora_dropout,
         init_lora_weights,
         use_rslora,
-        use_dora=False,
         init_method=init.xavier_normal_,
         input_is_parallel=True,
         gather_output=False,
@@ -113,7 +89,7 @@ class LoraParallelLinear(nn.Module, LoraLayer):
         megatron_config = parallel_linear_kwargs["megatron_config"]
         # lora needs to be forced to upgrade to 32-bit precision, otherwise it will overflow
         megatron_config.params_dtype = torch.float32
-        if self.is_parallel_a:
+        if self.is_paralle_a:
             lora_a = self.backend.RowParallelLinear(
                 input_size=self.in_features,
                 output_size=r,
@@ -186,45 +162,3 @@ class LoraParallelLinear(nn.Module, LoraLayer):
 
         result = result.to(previous_dtype)
         return result, bias
-
-
-def dispatch_megatron(
-    target: torch.nn.Module,
-    adapter_name: str,
-    lora_config,
-    **kwargs: Any,
-) -> Optional[torch.nn.Module]:
-    new_module = None
-
-    if isinstance(target, BaseTunerLayer):
-        target_base_layer = target.get_base_layer()
-    else:
-        target_base_layer = target
-
-    if lora_config.megatron_config:
-        megatron_core = importlib.import_module(lora_config.megatron_core)
-    else:
-        megatron_core = None
-
-    if megatron_core and isinstance(
-        target_base_layer,
-        (megatron_core.tensor_parallel.ColumnParallelLinear, megatron_core.tensor_parallel.RowParallelLinear),
-    ):
-        megatron_kwargs = kwargs.copy()
-        megatron_config = lora_config.megatron_config
-        if isinstance(megatron_config, dict):
-            transformer_config_class = megatron_core.transformer.transformer_config.TransformerConfig
-            megatron_config = transformer_config_class(**lora_config.megatron_config)
-        megatron_kwargs["megatron_config"] = megatron_config
-        if megatron_kwargs["fan_in_fan_out"]:
-            warnings.warn(
-                "fan_in_fan_out is set to True but the target module is `ColumnParallelLinear` "
-                "or `RowParallelLinear`. "
-                "Setting fan_in_fan_out to False."
-            )
-            megatron_kwargs["fan_in_fan_out"] = lora_config.fan_in_fan_out = False
-        new_module = LoraParallelLinear(
-            base_layer=target, adapter_name=adapter_name, backend=megatron_core.tensor_parallel, **megatron_kwargs
-        )
-
-    return new_module

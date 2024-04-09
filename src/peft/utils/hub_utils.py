@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023-present the HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,9 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .config import PolyConfig
-from .layer import Linear, PolyLayer
-from .model import PolyModel
+from huggingface_hub import get_hf_file_metadata, hf_hub_url
+from huggingface_hub.utils import EntryNotFoundError
 
 
-__all__ = ["Linear", "PolyConfig", "PolyLayer", "PolyModel"]
+def hub_file_exists(repo_id: str, filename: str, revision: str = None, repo_type: str = None) -> bool:
+    r"""
+    Checks if a file exists in a remote Hub repository.
+    """
+    url = hf_hub_url(repo_id=repo_id, filename=filename, repo_type=repo_type, revision=revision)
+    try:
+        get_hf_file_metadata(url)
+        return True
+    except EntryNotFoundError:
+        return False

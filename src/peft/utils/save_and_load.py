@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023-present the HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,13 +21,7 @@ from huggingface_hub import file_exists, hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError
 from safetensors.torch import load_file as safe_load_file
 
-from .other import (
-    EMBEDDING_LAYER_NAMES,
-    SAFETENSORS_WEIGHTS_NAME,
-    WEIGHTS_NAME,
-    check_file_exists_on_hf_hub,
-    infer_device,
-)
+from .other import EMBEDDING_LAYER_NAMES, SAFETENSORS_WEIGHTS_NAME, WEIGHTS_NAME, infer_device
 from .peft_types import PeftType
 
 
@@ -35,10 +30,10 @@ def has_valid_embedding_base_layer(layer):
     return hasattr(layer, "base_layer") and isinstance(layer.base_layer, (torch.nn.Linear, torch.nn.Embedding))
 
 
-def get_embedding_layer_name(model, layer, is_embedding_in_target_modules):
+def get_embedding_layer_name(model, layer, is_prompt_learning):
     """Get the name of the embedding module for a given layer."""
     for name, module in model.named_modules():
-        if (not is_embedding_in_target_modules and module == layer) or module == getattr(layer, "base_layer", None):
+        if (is_prompt_learning and module == layer) or module == layer.base_layer:
             return name
     return None
 
@@ -120,8 +115,8 @@ def get_peft_model_state_dict(
         to_return = {k: state_dict[k] for k in state_dict if "ia3_" in k}
     elif config.peft_type == PeftType.OFT:
         to_return = {k: state_dict[k] for k in state_dict if "oft_" in k}
-    elif config.peft_type == PeftType.POLY:
-        to_return = {k: state_dict[k] for k in state_dict if "poly_" in k}
+    elif config.peft_type == PeftType.ADAMIX:
+        to_return = {k: state_dict[k] for k in state_dict if "adamix" in k}
     else:
         raise NotImplementedError
     if getattr(model, "modules_to_save", None) is not None:
@@ -130,53 +125,21 @@ def get_peft_model_state_dict(
                 to_return[key.replace("modules_to_save.", "")] = value
 
     # check the common embedding layers in `target_modules` to reset `save_embedding_layers` if necessary
-    is_embedding_in_target_modules = False
     if (
         save_embedding_layers == "auto"
         and hasattr(config, "target_modules")
         and any(k in config.target_modules for k in EMBEDDING_LAYER_NAMES)
     ):
         warnings.warn("Setting `save_embedding_layers` to `True` as embedding layers found in `target_modules`.")
-        save_embedding_layers = is_embedding_in_target_modules = True
+        save_embedding_layers = True
     elif save_embedding_layers == "auto":
-        vocab_size = getattr(getattr(model, "config", None), "vocab_size", None)
-        model_id = getattr(config, "base_model_name_or_path", None)
-
-        # For some models e.g. diffusers the text config file is stored in a subfolder
-        # we need to make sure we can download that config.
-        has_remote_config = False
-
-        # ensure that this check is not performed in HF offline mode, see #1452
-        if model_id is not None:
-            exists = check_file_exists_on_hf_hub(model_id, "config.json")
-            if exists is None:
-                # check failed, could not determine if it exists or not
-                warnings.warn(
-                    f"Could not find a config file in {model_id} - will assume that the vocabulary was not modified."
-                )
-                has_remote_config = False
-            else:
-                has_remote_config = exists
-
-        # check if the vocab size of the base model is different from the vocab size of the finetuned model
-        if (
-            vocab_size
-            and model_id
-            and has_remote_config
-            and (vocab_size != model.config.__class__.from_pretrained(model_id).vocab_size)
-        ):
-            warnings.warn(
-                "Setting `save_embedding_layers` to `True` as the embedding layer has been resized during finetuning."
-            )
-            save_embedding_layers = True
-        else:
-            save_embedding_layers = False
+        save_embedding_layers = False
 
     if save_embedding_layers and hasattr(model, "get_input_embeddings"):
         for layer in [model.get_input_embeddings(), model.get_output_embeddings()]:
-            if not is_embedding_in_target_modules or has_valid_embedding_base_layer(layer):
+            if config.is_prompt_learning or has_valid_embedding_base_layer(layer):
                 # support from version >= 0.6.2
-                embedding_module_name = get_embedding_layer_name(model, layer, is_embedding_in_target_modules)
+                embedding_module_name = get_embedding_layer_name(model, layer, config.is_prompt_learning)
                 if embedding_module_name:
                     to_return.update({k: v for k, v in state_dict.items() if embedding_module_name in k})
     elif save_embedding_layers:
@@ -207,15 +170,7 @@ def set_peft_model_state_dict(model, peft_model_state_dict, adapter_name="defaul
     else:
         state_dict = peft_model_state_dict
 
-    if config.peft_type in (
-        PeftType.LORA,
-        PeftType.LOHA,
-        PeftType.LOKR,
-        PeftType.ADALORA,
-        PeftType.IA3,
-        PeftType.OFT,
-        PeftType.POLY,
-    ):
+    if config.peft_type in (PeftType.LORA, PeftType.LOHA, PeftType.LOKR, PeftType.ADALORA, PeftType.IA3, PeftType.OFT, PeftType.ADAMIX):
         peft_model_state_dict = {}
         parameter_prefix = {
             PeftType.IA3: "ia3_",
@@ -224,16 +179,21 @@ def set_peft_model_state_dict(model, peft_model_state_dict, adapter_name="defaul
             PeftType.LOHA: "hada_",
             PeftType.LOKR: "lokr_",
             PeftType.OFT: "oft_",
-            PeftType.POLY: "poly_",
+            PeftType.ADAMIX: "expert_mixture_",
         }[config.peft_type]
         for k, v in state_dict.items():
             if parameter_prefix in k:
-                suffix = k.split(parameter_prefix)[1]
-                if "." in suffix:
-                    suffix_to_replace = ".".join(suffix.split(".")[1:])
-                    k = k.replace(suffix_to_replace, f"{adapter_name}.{suffix_to_replace}")
+                prefix, suffix = k.split(parameter_prefix)
+                # suffix = k.split(parameter_prefix)[1]
+                if config.peft_type == PeftType.ADAMIX:
+                    split_suffix = suffix.split(".")
+                    k = f"{prefix+parameter_prefix[:-1]}.{adapter_name}_{split_suffix[0]}.{split_suffix[1]}"
                 else:
-                    k = f"{k}.{adapter_name}"
+                    if "." in suffix:
+                        suffix_to_replace = ".".join(suffix.split(".")[1:])
+                        k = k.replace(suffix_to_replace, f"{adapter_name}.{suffix_to_replace}")
+                    else:
+                        k = f"{k}.{adapter_name}"
                 peft_model_state_dict[k] = v
             else:
                 peft_model_state_dict[k] = v
@@ -289,14 +249,9 @@ def load_peft_weights(model_id: str, device: Optional[str] = None, **hf_hub_down
         if token is None:
             token = hf_hub_download_kwargs.get("use_auth_token", None)
 
-        hub_filename = (
-            os.path.join(hf_hub_download_kwargs["subfolder"], SAFETENSORS_WEIGHTS_NAME)
-            if hf_hub_download_kwargs.get("subfolder", None) is not None
-            else SAFETENSORS_WEIGHTS_NAME
-        )
         has_remote_safetensors_file = file_exists(
             repo_id=model_id,
-            filename=hub_filename,
+            filename=SAFETENSORS_WEIGHTS_NAME,
             revision=hf_hub_download_kwargs.get("revision", None),
             repo_type=hf_hub_download_kwargs.get("repo_type", None),
             token=token,

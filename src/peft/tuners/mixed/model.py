@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023-present the HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -159,10 +160,10 @@ class MixedModel(BaseTuner):
         if (gptq_quantization_config is not None) or (AutoGPTQQuantLinear is not None):
             raise ValueError(f"GPTQ quantization not supported for {config.peft_type.value} (yet).")
 
-        loaded_in_8bit = kwargs.pop("loaded_in_8bit", False)
-        loaded_in_4bit = kwargs.pop("loaded_in_4bit", False)
-        if loaded_in_8bit or loaded_in_4bit:
-            raise ValueError(f"8bit and 4bit quantization not supported for {config.peft_type.value} (yet).")
+        # loaded_in_8bit = kwargs.pop("loaded_in_8bit", False)
+        # loaded_in_4bit = kwargs.pop("loaded_in_4bit", False)
+        # if loaded_in_8bit or loaded_in_4bit:
+        #     raise ValueError(f"8bit and 4bit quantization not supported for {config.peft_type.value} (yet).")
 
         if isinstance(config, adalora.AdaLoraConfig):
             new_module = adalora.AdaLoraModel._create_new_module(config, adapter_name, target, **kwargs)
@@ -177,13 +178,6 @@ class MixedModel(BaseTuner):
         else:
             raise ValueError(f"Unknown config type {type(config)}, should be one of {COMPATIBLE_TUNER_TYPES}.")
         return new_module
-
-    def __getattr__(self, name: str):
-        """Forward missing attributes to the wrapped module."""
-        try:
-            return super().__getattr__(name)  # defer to nn.Module's logic
-        except AttributeError:
-            return getattr(self.model, name)
 
     def _set_adapter_layers(self, enabled=True):
         for module in self.model.modules():
@@ -262,13 +256,7 @@ class MixedModel(BaseTuner):
                 self._replace_module(parent, target_name, target.get_base_layer(), target)
             elif isinstance(target, ModulesToSaveWrapper):
                 # save any additional trainable modules part of `modules_to_save`
-                new_module = target.modules_to_save[target.active_adapter]
-                if hasattr(new_module, "base_layer"):
-                    # check if the module is itself a tuner layer
-                    if merge:
-                        new_module.merge(safe_merge=safe_merge, adapter_names=adapter_names)
-                    new_module = new_module.get_base_layer()
-                setattr(parent, target_name, new_module)
+                setattr(parent, target_name, target.modules_to_save[target.active_adapter])
 
         return self.model
 

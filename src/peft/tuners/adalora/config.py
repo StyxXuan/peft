@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023-present the HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -38,7 +39,7 @@ class AdaLoraConfig(LoraConfig):
     """
 
     target_r: int = field(default=8, metadata={"help": "Target Lora matrix dimension."})
-    init_r: int = field(default=12, metadata={"help": "Initial Lora matrix dimension."})
+    init_r: int = field(default=12, metadata={"help": "Intial Lora matrix dimension."})
     tinit: int = field(default=0, metadata={"help": "The steps of initial warmup."})
     tfinal: int = field(default=0, metadata={"help": "The steps of final warmup."})
     deltaT: int = field(default=1, metadata={"help": "Step interval of rank allocation."})

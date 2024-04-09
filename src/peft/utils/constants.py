@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023-present the HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -73,10 +74,8 @@ TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING = {
     "btlm": ["c_proj", "c_attn"],
     "codegen": ["qkv_proj"],
     "mistral": ["q_proj", "v_proj"],
-    "mixtral": ["q_proj", "v_proj"],
     "stablelm": ["q_proj", "v_proj"],
-    "phi": ["q_proj", "v_proj", "fc1", "fc2"],
-    "gemma": ["q_proj", "v_proj"],
+    "phi": ["Wqkv", "out_proj", "fc1", "fc2"],
 }
 
 TRANSFORMERS_MODELS_TO_IA3_TARGET_MODULES_MAPPING = {
@@ -92,16 +91,12 @@ TRANSFORMERS_MODELS_TO_IA3_TARGET_MODULES_MAPPING = {
     "bart": ["q_proj", "v_proj", "fc2"],
     "gpt_bigcode": ["c_attn", "mlp.c_proj"],
     "llama": ["k_proj", "v_proj", "down_proj"],
-    "mistral": ["k_proj", "v_proj", "down_proj"],
-    "mixtral": ["k_proj", "v_proj", "w2"],
     "bert": ["key", "value", "output.dense"],
     "deberta-v2": ["key_proj", "value_proj", "output.dense"],
     "deberta": ["in_proj", "output.dense"],
     "RefinedWebModel": ["query_key_value", "dense_4h_to_h"],
     "RefinedWeb": ["query_key_value", "dense_4h_to_h"],
     "falcon": ["query_key_value", "dense_4h_to_h"],
-    "phi": ["q_proj", "v_proj", "fc2"],
-    "gemma": ["q_proj", "v_proj", "down_proj"],
 }
 
 TRANSFORMERS_MODELS_TO_IA3_FEEDFORWARD_MODULES_MAPPING = {
@@ -117,16 +112,12 @@ TRANSFORMERS_MODELS_TO_IA3_FEEDFORWARD_MODULES_MAPPING = {
     "bart": ["fc2"],
     "gpt_bigcode": ["mlp.c_proj"],
     "llama": ["down_proj"],
-    "mistral": ["down_proj"],
-    "mixtral": ["w2"],
     "bert": ["output.dense"],
     "deberta-v2": ["output.dense"],
     "deberta": ["output.dense"],
     "RefinedWeb": ["dense_4h_to_h"],
     "RefinedWebModel": ["dense_4h_to_h"],
     "falcon": ["dense_4h_to_h"],
-    "phi": ["fc2"],
-    "gemma": ["down_proj"],
 }
 
 TRANSFORMERS_MODELS_TO_ADALORA_TARGET_MODULES_MAPPING = {
@@ -150,9 +141,27 @@ TRANSFORMERS_MODELS_TO_ADALORA_TARGET_MODULES_MAPPING = {
     # "layoutlm": ["query", "value"],
 }
 
+TRANSFORMERS_MODELS_TO_ADAMIX_TARGET_MODULES_MAPPING = {
+    "bart": ["BartEncoderLayer", "BartDecoderLayer"],
+    "bert": ["BertLayer"],
+    "bloom": ["BloomBlock"],
+    "deberta": ["DebertaLayer"],
+    "deberta-v2": ["DebertaV2Layer"],
+    "gpt_bigcode": ["GPTBigCodeBlock"],
+    "gptj": ["GPTJBlock"],
+    "gpt_neo": ["GPTNeoBlock"],
+    "gpt_neox": ["GPTNeoXLayer"],
+    "gpt2": ["GPT2Block"],
+    "llama": ["LlamaDecoderLayer"],
+    "mt5": ["MT5Block"],
+    "opt": ["OPTDecoderLayer"],
+    "roberta": ["RobertaLayer"],
+    "t5": ["T5Block"],
+    "umt5": ["UMT5Block"],
+}
+
+COMMON_LAYERS_PATTERN = ["layers", "h", "block", "blocks", "layer"]
 WEIGHTS_NAME = "adapter_model.bin"
 SAFETENSORS_WEIGHTS_NAME = "adapter_model.safetensors"
 CONFIG_NAME = "adapter_config.json"
 EMBEDDING_LAYER_NAMES = ["embed_tokens", "lm_head"]
-INCLUDE_LINEAR_LAYERS_SHORTHAND = "all-linear"
-TOKENIZER_CONFIG_NAME = "tokenizer_config.json"

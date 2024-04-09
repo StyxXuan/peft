@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023-present the HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -82,19 +83,18 @@ def _check_config_compatible(peft_config: PeftConfig) -> None:
 
 class PeftMixedModel(PushToHubMixin, torch.nn.Module):
     """
-    PeftMixedModel for loading mixing different types of adapters for inference.
+    Peft model for mixing different types of adapters.
 
-    This class does not support loading/saving, and it shouldn't usually be initialized directly. Instead, use
-    `get_peft_model` with the argument `mixed=True`.
+    This class currently does not support saving and loading. Instead, it is assumed that the adapters are already
+    trained and loading the model requires a script to be run each time.
 
-    <Tip>
+    Currently, the main purpose of mixed adapter types is to combine trained adapters for inference. Although it is
+    technically possible to train a mixed adapter model, this has not been tested and is not recommended.
 
-    Read the [Mixed adapter types](https://huggingface.co/docs/peft/en/developer_guides/mixed_models) guide to learn
-    more about using different adapter types.
+    Note: This class should usually not be initialized directly. Instead, use `get_peft_model` with the argument
+    `mixed=True`.
 
-    </Tip>
-
-    Example:
+    Below is an example that shows how to load a mixed model with two different types of adapters.
 
     ```py
     >>> from peft import get_peft_model
@@ -105,6 +105,16 @@ class PeftMixedModel(PushToHubMixin, torch.nn.Module):
     >>> peft_model.set_adapter(["adapter1", "adapter2"])  # activate both adapters
     >>> peft_model(data)  # forward pass using both adapters
     ```
+
+    Tips:
+
+    - Not all adapter types can be combined. See `peft.tuners.mixed.COMPATIBLE_TUNER_TYPES` for a list of compatible
+      types. An error will be raised if you are trying to combine incompatible adapter types.
+    - It is possible to mix multiple adapters of the same type. This can be useful to combine adapters with very
+      different configs.
+    - If you want to combine a lot of different adapters, it is most performant to add the same types of adapters
+      consecutively. E.g., add LoRA1, LoRA2, LoHa1, LoHa2 in this order, instead of LoRA1, LoHa1, LoRA2, LoHa2. As long
+      as the adapters are commutative, the order does not matter for the final result.
 
     Args:
         model (`torch.nn.Module`):
@@ -171,13 +181,6 @@ class PeftMixedModel(PushToHubMixin, torch.nn.Module):
     def print_trainable_parameters(self):
         """
         Prints the number of trainable parameters in the model.
-
-        Note: print_trainable_parameters() uses get_nb_trainable_parameters() which is different from
-        num_parameters(only_trainable=True) from huggingface/transformers. get_nb_trainable_parameters() returns
-        (trainable parameters, all parameters) of the Peft Model which includes modified backbone transformer model.
-        For techniques like LoRA, the backbone transformer model is modified in place with LoRA modules. However, for
-        prompt tuning, the backbone transformer model is unmodified. num_parameters(only_trainable=True) returns number
-        of trainable parameters of the backbone transformer model which can be different.
         """
         # note: same as PeftModel.print_trainable_parameters
         trainable_params, all_param = self.get_nb_trainable_parameters()
@@ -188,14 +191,7 @@ class PeftMixedModel(PushToHubMixin, torch.nn.Module):
             f"trainable%: {100 * trainable_params / all_param:.4f}"
         )
 
-    def __getattr__(self, name: str):
-        """Forward missing attributes to the wrapped module."""
-        try:
-            return super().__getattr__(name)  # defer to nn.Module's logic
-        except AttributeError:
-            return getattr(self.base_model, name)
-
-    def forward(self, *args: Any, **kwargs: Any):
+    def forward(self ,*args: Any, **kwargs: Any):
         """
         Forward pass of the model.
         """
@@ -224,7 +220,7 @@ class PeftMixedModel(PushToHubMixin, torch.nn.Module):
         try:
             self.peft_config[adapter_name] = peft_config
             self.base_model.inject_adapter(self, adapter_name)
-        except Exception:  # something went wrong, roll back
+        except Exception:  # somthing went wrong, roll back
             if adapter_name in self.peft_config:
                 del self.peft_config[adapter_name]
             raise
@@ -249,15 +245,6 @@ class PeftMixedModel(PushToHubMixin, torch.nn.Module):
         in which they are passed to this function. Instead, the order during the forward pass is determined by the
         order in which the adapters were loaded into the model. The active adapters only determine which adapters are
         active during the forward pass, but not the order in which they are applied.
-
-        Additionally, this function will set the specified adapters to trainable (i.e., requires_grad=True). If this is
-        not desired, use the following code.
-
-        ```py
-        >>> for name, param in model_peft.named_parameters():
-        ...     if ...:  # some check on name (ex. if 'lora' in name)
-        ...         param.requires_grad = False
-        ```
 
         Args:
             adapter_name (`str` or `List[str]`):
@@ -363,7 +350,7 @@ class PeftMixedModel(PushToHubMixin, torch.nn.Module):
                 Whether the adapter should be trainable or not. If `False`, the adapter will be frozen and use for
                 inference
             config ([`~peft.PeftConfig`], *optional*):
-                The configuration object to use instead of an automatically loaded configuration. This configuration
+                The configuration object to use instead of an automatically loaded configuation. This configuration
                 object is mutually exclusive with `model_id` and `kwargs`. This is useful when configuration is already
                 loaded before calling `from_pretrained`.
             kwargs: (`optional`):

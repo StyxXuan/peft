@@ -29,4 +29,4 @@ from .prompt_tuning import PromptEmbedding, PromptTuningConfig, PromptTuningInit
 from .multitask_prompt_tuning import MultitaskPromptEmbedding, MultitaskPromptTuningConfig, MultitaskPromptTuningInit
 from .oft import OFTConfig, OFTModel
 from .mixed import MixedModel
-from .poly import PolyConfig, PolyModel
+from .adamix import AdaMixConfig, AdaMixModel
