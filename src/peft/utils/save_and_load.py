@@ -102,6 +102,26 @@ def get_peft_model_state_dict(
                 config.rank_pattern = rank_pattern
                 to_return = model.resize_state_dict_by_rank_pattern(rank_pattern, to_return, adapter_name)
 
+    elif config.peft_type == PeftType.SRMOLE:
+        bias = config.bias
+        if bias == "none":
+            to_return = {k: state_dict[k] for k in state_dict if "lora_" in k or "router" == k}
+        elif bias == "all":
+            to_return = {k: state_dict[k] for k in state_dict if "lora_" in k or "bias" in k or "router" == k}
+        elif bias == "lora_only":
+            to_return = {}
+            for k in state_dict:
+                if "lora_" in k or "router" == k:
+                    to_return[k] = state_dict[k]
+                    if k == "router":
+                        bias_name = k.split("router")[0] + "bias"
+                    else:
+                        bias_name = k.split("lora_")[0] + "bias"
+
+                    if bias_name in state_dict:
+                        to_return[bias_name] = state_dict[bias_name]
+
+
         if config.use_dora:
             # Here we take care of a refactor of DoRA which changed lora_magnitude_vector from a ParameterDict to a
             # ModuleDict with a DoraLayer instance. The old parameter is now the "weight" attribute of that layer. Since
@@ -347,6 +367,7 @@ def set_peft_model_state_dict(
         PeftType.FOURIERFT,
         PeftType.HRA,
         PeftType.VBLORA,
+        PeftType.SRMOLE,
     ):
         peft_model_state_dict = {}
         parameter_prefix = {
@@ -363,6 +384,7 @@ def set_peft_model_state_dict(
             PeftType.FOURIERFT: "fourierft_",
             PeftType.HRA: "hra_",
             PeftType.VBLORA: "vblora_",
+            PeftType.SRMOLE: "lora_",
         }[config.peft_type]
         if config.peft_type == PeftType.VBLORA and config.save_only_topk_weights:
             num_vectors, _ = model.vblora_vector_bank[adapter_name].shape

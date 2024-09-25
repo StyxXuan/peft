@@ -63,6 +63,7 @@ class PeftType(str, enum.Enum):
     XLORA = "XLORA"
     HRA = "HRA"
     VBLORA = "VBLORA"
+    SRMOLE = "SRMOLE"
 
 
 class TaskType(str, enum.Enum):
