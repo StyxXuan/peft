@@ -158,18 +158,17 @@ if is_bnb_4bit_available():
                 selected_lora_A_weight = lora_A_weight[indices]  # 形状为 (b, s, k, d)
                 
                 # 获取 selected_lora_B_weight，变为 (b, s, k, d)
-                selected_lora_B_weight = lora_B_weight[:, indices]  # 形状为 (d, b, s, k)
-                selected_lora_B_weight = selected_lora_B_weight.permute(1, 2, 0, 3)  # 变为 (b, s, d, k)
+                selected_lora_B_weight = lora_B_weight.t()[indices].permute(0, 2, 1)  # 形状为 (b, s, k, d)
 
-                # print(x.shape)  # 输入 x 的形状
-                # print(selected_lora_A_weight.shape)  # 选择后的 lora_A_weight 的形状 (b, s, k, d)
-                # print(selected_lora_B_weight.shape)  # 选择后的 lora_B_weight 的形状 (b, s, k, d)
+                print(x.shape)  # 输入 x 的形状
+                print(selected_lora_A_weight.shape)  # 选择后的 lora_A_weight 的形状 (b, s, k, d)
+                print(selected_lora_B_weight.shape)  # 选择后的 lora_B_weight 的形状 (b, s, k, d)
 
                 # 计算 selected_lora_A_output
-                selected_lora_A_output = torch.einsum("bsd,bskd->bsk", (dropout(x), selected_lora_A_weight))  # (b, s, k)
+                selected_lora_A_output = torch.einsum("bsd,rd->bsr", (dropout(x), selected_lora_A_weight))  # (b, s, k)
 
                 # 计算 selected_lora_B_output
-                selected_lora_B_output = torch.einsum("bsk,bsdk->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
+                selected_lora_B_output = torch.einsum("bsr,dk->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
                 if requires_conversion:
                     selected_lora_B_output = selected_lora_B_output.to(expected_dtype)
 

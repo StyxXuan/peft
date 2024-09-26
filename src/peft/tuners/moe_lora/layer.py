@@ -32,41 +32,54 @@ else:
     from transformers.deepspeed import deepspeed_config
 
 
-class SRMoLELayer(LoraLayer):
+class MoELoRALayer(LoraLayer):
     # List all names of layers that may contain adapter weights
     adapter_layer_names = ("lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B", "router")
     # All names of other parameters that may contain adapter-related parameters
-    other_param_names = ("r", "lora_alpha", "scaling", "lora_dropout", "activate_r")
+    other_param_names = ("r", "lora_alpha", "scaling", "lora_dropout", "expert_num")
 
     def __init__(self, base_layer: nn.Module) -> None:
         super().__init__(base_layer)
-        self.activate_r = {}
+        self.expert_num = {}
         self.router = nn.ParameterDict({})
+        self.lora_A = nn.ParameterDict()
+        self.lora_B = nn.ParameterDict()
 
-
-    def update_layer(self, adapter_name, r, activate_r, lora_alpha, lora_dropout, init_lora_weights):
+    def update_layer(self, adapter_name, r, expert_num, lora_alpha, lora_dropout, init_lora_weights):
         if r < 0:
             # note: r == 0 is allowed for AdaLora, see #1539
             raise ValueError(f"`r` should be a positive integer or 0, but the value passed is {r}")
 
         self.r[adapter_name] = r
-        self.lora_alpha[adapter_name] = lora_alpha
+        self.expert_num[adapter_name] = expert_num
         if lora_dropout > 0.0:
             lora_dropout_layer = nn.Dropout(p=lora_dropout)
         else:
             lora_dropout_layer = nn.Identity()
 
         self.lora_dropout[adapter_name] = lora_dropout_layer
-        self.activate_r[adapter_name] = activate_r
 
         # Actual trainable parameters
         # Right singular vectors
-        self.lora_A[adapter_name] = nn.Linear(self.in_features, r, bias=False)
-        self.lora_B[adapter_name] = nn.Linear(r, self.out_features, bias=False)
+        self.lora_A[adapter_name] = nn.Parameter(
+            torch.empty(
+                expert_num,
+                r,
+                self.in_features,
+            )
+        )
+
+        self.lora_B[adapter_name] = nn.Parameter(
+            torch.empty(
+                expert_num,
+                self.out_features,
+                r,
+            )
+        )
 
         # The current rank
-        self.router[adapter_name] = nn.Linear(self.in_features, r, bias=False)
-        self.scaling[adapter_name] = lora_alpha / activate_r
+        self.router[adapter_name] = nn.Linear(self.in_features, expert_num, bias=False)
+        self.scaling[adapter_name] = lora_alpha / r
 
         if init_lora_weights:
             self.reset_lora_parameters(adapter_name)
@@ -76,17 +89,17 @@ class SRMoLELayer(LoraLayer):
 
     def reset_lora_parameters(self, adapter_name):
         if adapter_name in self.lora_A.keys():
-            nn.init.kaiming_uniform_(self.lora_A[adapter_name].weight, a=math.sqrt(5))
-            nn.init.zeros_(self.lora_B[adapter_name].weight)
+            nn.init.kaiming_uniform_(self.lora_A[adapter_name], a=math.sqrt(5))
+            nn.init.zeros_(self.lora_B[adapter_name])
 
-class SRMoLELinear(nn.Module, SRMoLELayer):
+class MoELoRALinear(nn.Module, MoELoRALayer):
     # SVD-based adaptation by a dense layer
     def __init__(
         self,
         base_layer: nn.Module,
         adapter_name: str,
         r: int = 0,
-        activate_r: int = 0,
+        expert_num: int = 0,
         lora_alpha: int = 1,
         lora_dropout: float = 0.0,
         fan_in_fan_out: bool = False,
@@ -94,13 +107,13 @@ class SRMoLELinear(nn.Module, SRMoLELayer):
         **kwargs,
     ) -> None:
         super().__init__()
-        SRMoLELayer.__init__(self, base_layer)
+        MoELoRALayer.__init__(self, base_layer)
         # Freezing the pre-trained weight matrix
         self.get_base_layer().weight.requires_grad = False
 
         self.fan_in_fan_out = fan_in_fan_out
         self._active_adapter = adapter_name
-        self.update_layer(adapter_name, r, activate_r, lora_alpha, lora_dropout, init_lora_weights)
+        self.update_layer(adapter_name, r, expert_num, lora_alpha, lora_dropout, init_lora_weights)
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
         if self.disable_adapters:
@@ -115,35 +128,36 @@ class SRMoLELinear(nn.Module, SRMoLELayer):
                 if active_adapter not in self.lora_A.keys():
                     continue
                 
-                lora_A_weight = self.lora_A[active_adapter].weight  # 形状为 (r, d)
-                lora_B_weight = self.lora_B[active_adapter].weight  # 形状为 (d, r)
+                lora_A_weight = self.lora_A[active_adapter]  # 形状为 (n, r, d)
+                lora_B_weight = self.lora_B[active_adapter]  # 形状为 (n, d, r)
 
                 router = self.router[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
 
-                router_output = router(x)  # 形状为 (b, s, r)
+                router_output = router(x)  # 形状为 (b, s, n)
                 router_output = F.softmax(router_output, dim=2)  # 在 r 维度上应用 softmax
 
-                # 选择 top activate_r 参数基于 softmax 得分
-                _, indices = torch.topk(router_output, self.activate_r[active_adapter], dim=2)  # indices 形状为 (b, s, k)
+                # 选择 top expert_num 参数基于 softmax 得分
+                _, indices = torch.topk(router_output, self.expert_num[active_adapter], dim=2)  # indices 形状为 (b, s, k)
 
                 # 使用 gather 获取 selected_lora_A_weight 和 selected_lora_B_weight
                 selected_lora_A_weight = lora_A_weight[indices]  # 形状为 (b, s, k, d)
-                
+                # todo 
                 # 获取 selected_lora_B_weight，变为 (b, s, k, d)
-                selected_lora_B_weight = lora_B_weight[:, indices]  # 形状为 (d, b, s, k)
-                selected_lora_B_weight = selected_lora_B_weight.permute(1, 2, 0, 3)  # 变为 (b, s, d, k)
+                selected_lora_B_weight = lora_B_weight.t()[indices].permute(0, 2, 1)  # 形状为 (b, s, k, d)
+                # todo 
 
-                # print(x.shape)  # 输入 x 的形状
-                # print(selected_lora_A_weight.shape)  # 选择后的 lora_A_weight 的形状 (b, s, k, d)
-                # print(selected_lora_B_weight.shape)  # 选择后的 lora_B_weight 的形状 (b, s, k, d)
+                print(x.shape)  # 输入 x 的形状
+                print(selected_lora_A_weight.shape)  # 选择后的 lora_A_weight 的形状 (b, s, k, d)
+                print(selected_lora_B_weight.shape)  # 选择后的 lora_B_weight 的形状 (b, s, k, d)
 
                 # 计算 selected_lora_A_output
-                selected_lora_A_output = torch.einsum("bsd,bskd->bsk", (dropout(x), selected_lora_A_weight))  # (b, s, k)
+                selected_lora_A_output = torch.einsum("bsd,bsrd->bsr", (dropout(x), selected_lora_A_weight))  # (b, s, k)
 
                 # 计算 selected_lora_B_output
-                selected_lora_B_output = torch.einsum("bsk,bsdk->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
+                selected_lora_B_output = torch.einsum("bsr,bsdr->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
+
                 # 更新结果
                 result = result + selected_lora_B_output * scaling
                 
@@ -151,5 +165,5 @@ class SRMoLELinear(nn.Module, SRMoLELayer):
 
     def __repr__(self) -> str:
         rep = super().__repr__()
-        return "srmole." + rep
+        return "moelora." + rep
 

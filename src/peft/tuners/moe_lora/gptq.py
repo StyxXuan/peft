@@ -60,28 +60,17 @@ class SRMoLEQuantLinear(torch.nn.Module, SRMoLELayer):
             dropout = self.lora_dropout[active_adapter]
             scaling = self.scaling[active_adapter]
 
-            router_output = router(x)  # 形状为 (b, s, r)
-            router_output = F.softmax(router_output, dim=2)  # 在 r 维度上应用 softmax
+            router_output= router(x)
+            router_output = F.softmax(router_output, dim=0)  # Apply softmax across the rows
+        
+            # Select top activate_r parameters based on softmax scores
+            _, indices = torch.topk(router_output, self.activate_r[active_adapter], dim=0)
 
-            # 选择 top activate_r 参数基于 softmax 得分
-            _, indices = torch.topk(router_output, self.activate_r[active_adapter], dim=2)  # indices 形状为 (b, s, k)
+            selected_lora_A_weight = lora_A_weight[indices.squeeze(0)]  # Select active rows
+            selected_lora_B_weight = lora_B_weight[:, indices.squeeze(0)]  # Select corresponding columns
 
-            # 使用 gather 获取 selected_lora_A_weight 和 selected_lora_B_weight
-            selected_lora_A_weight = lora_A_weight[indices]  # 形状为 (b, s, k, d)
-            
-            # 获取 selected_lora_B_weight，变为 (b, s, k, d)
-            selected_lora_B_weight = lora_B_weight[:, indices]  # 形状为 (d, b, s, k)
-            selected_lora_B_weight = selected_lora_B_weight.permute(1, 2, 0, 3)  # 变为 (b, s, d, k)
-
-            # print(x.shape)  # 输入 x 的形状
-            # print(selected_lora_A_weight.shape)  # 选择后的 lora_A_weight 的形状 (b, s, k, d)
-            # print(selected_lora_B_weight.shape)  # 选择后的 lora_B_weight 的形状 (b, s, k, d)
-
-            # 计算 selected_lora_A_output
-            selected_lora_A_output = torch.einsum("bsd,bskd->bsk", (dropout(x), selected_lora_A_weight))  # (b, s, k)
-
-            # 计算 selected_lora_B_output
-            selected_lora_B_output = torch.einsum("bsk,bsdk->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
+            selected_lora_A_output = dropout(x) @ selected_lora_A_weight.T
+            selected_lora_B_output = selected_lora_A_output @ selected_lora_B_weight.T
             if requires_conversion:
                 selected_lora_B_output = selected_lora_B_output.to(expected_dtype)
 
