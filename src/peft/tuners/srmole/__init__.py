@@ -18,9 +18,9 @@ from .config import SRMoLEConfig
 from .gptq import SRMoLEQuantLinear
 from .layer import SRMoLELayer, SRMoLELinear
 from .model import SRMoLEModel
+from .topk import TopK_custom
 
-
-__all__ = ["SRMoLEConfig", "SRMoLELayer", "SRMoLEModel", "SRMoLELinear", "SRMoLEQuantLinear"]
+__all__ = ["SRMoLEConfig", "SRMoLELayer", "SRMoLEModel", "SRMoLELinear", "SRMoLEQuantLinear", "TopK_custom"]
 
 
 def __getattr__(name):

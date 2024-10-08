@@ -135,30 +135,35 @@ class MoELoRALinear(nn.Module, MoELoRALayer):
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
 
-                router_output = router(x)  # 形状为 (b, s, n)
-                router_output = F.softmax(router_output, dim=2)  # 在 r 维度上应用 softmax
+                router_logits = router(x)  # 形状为 (b, s, n)
+                if self.training:
+                    # 训练阶段，使用 Gumbel-Softmax，hard=False，使用 soft routing
+                    router_probs = F.gumbel_softmax(router_logits, tau=0.1, hard=False, dim=-1)  # (b, s, n)
+                    
+                    # 使用 torch.matmul 进行加权求和
+                    # （在训练阶段，这是必要的，以确保梯度能够传回所有专家）
 
-                # 选择 top expert_num 参数基于 softmax 得分
-                _, indices = torch.topk(router_output, self.expert_num[active_adapter], dim=2)  # indices 形状为 (b, s, k)
+                    lora_A_weight_flat = lora_A_weight.view(lora_A_weight.shape[0], -1)  # (n, r*d)
+                    lora_B_weight_flat = lora_B_weight.view(lora_B_weight.shape[0], -1)  # (n, d*r)
 
-                # 使用 gather 获取 selected_lora_A_weight 和 selected_lora_B_weight
-                selected_lora_A_weight = lora_A_weight[indices]  # 形状为 (b, s, k, d)
-                # todo 
-                # 获取 selected_lora_B_weight，变为 (b, s, k, d)
-                selected_lora_B_weight = lora_B_weight.t()[indices].permute(0, 2, 1)  # 形状为 (b, s, k, d)
-                # todo 
+                    selected_lora_A_weight_flat = torch.matmul(router_probs, lora_A_weight_flat)  # (b, s, r*d)
+                    selected_lora_B_weight_flat = torch.matmul(router_probs, lora_B_weight_flat)  # (b, s, d*r)
+                    selected_lora_A_weight = selected_lora_A_weight_flat.view(-1, x.size(1), lora_A_weight.shape[1], lora_A_weight.shape[2])  # (b, s, r, d)
+                    selected_lora_B_weight = selected_lora_B_weight_flat.view(-1, x.size(1), lora_B_weight.shape[1], lora_B_weight.shape[2])  # (b, s, d, r)
 
-                print(x.shape)  # 输入 x 的形状
-                print(selected_lora_A_weight.shape)  # 选择后的 lora_A_weight 的形状 (b, s, k, d)
-                print(selected_lora_B_weight.shape)  # 选择后的 lora_B_weight 的形状 (b, s, k, d)
+                else:
+                    # 推理阶段，使用 Gumbel-Softmax，hard=True，使用 hard routing
+                    router_probs = F.gumbel_softmax(router_logits, tau=0.1, hard=True, dim=-1)  # (b, s, n)
+                    
+                    # 由于 router_probs 是 one-hot 向量，我们可以直接获取索引
+                    indices = torch.argmax(router_probs, dim=-1)  # (b, s)
+                    
+                    # 使用高级索引直接选择专家权重
+                    selected_lora_A_weight = lora_A_weight[indices]  # (b, s, r, d)
+                    selected_lora_B_weight = lora_B_weight[indices]  # (b, s, d, r)
 
-                # 计算 selected_lora_A_output
                 selected_lora_A_output = torch.einsum("bsd,bsrd->bsr", (dropout(x), selected_lora_A_weight))  # (b, s, k)
-
-                # 计算 selected_lora_B_output
                 selected_lora_B_output = torch.einsum("bsr,bsdr->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
-
-                # 更新结果
                 result = result + selected_lora_B_output * scaling
                 
         return result
