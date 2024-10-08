@@ -4,11 +4,11 @@ import torch.nn.functional as F
 
 def sinkhorn_forward(C, mu, nu, epsilon, max_iter):
     bs, n, k_ = C.size()
+    device = mu.device
 
     v = torch.ones([bs, 1, k_])/(k_)
     G = torch.exp(-C/epsilon)
-    if torch.cuda.is_available():
-        v = v.cuda()
+    v = v.to(device)
 
     for i in range(max_iter):
         u = mu/(G*v).sum(-1, keepdim=True)
@@ -20,12 +20,10 @@ def sinkhorn_forward(C, mu, nu, epsilon, max_iter):
 def sinkhorn_forward_stablized(C, mu, nu, epsilon, max_iter):
     bs, n, k_ = C.size()
     k = k_-1
+    device = mu.device
 
-    f = torch.zeros([bs, n, 1])
-    g = torch.zeros([bs, 1, k+1])
-    if torch.cuda.is_available():
-        f = f.cuda()
-        g = g.cuda()
+    f = torch.zeros([bs, n, 1]).to(device)
+    g = torch.zeros([bs, 1, k+1]).to(device)
 
     epsilon_log_mu = epsilon*torch.log(mu)
     epsilon_log_nu = epsilon*torch.log(nu)
@@ -108,21 +106,21 @@ class TopKFunc(Function):
 
 
 class TopK_custom(torch.nn.Module):
-    def __init__(self, k, epsilon=0.1, max_iter = 200):
+    def __init__(self, k, epsilon=0.1, max_iter=200):
         super(TopK_custom, self).__init__()
         self.k = k
         self.epsilon = epsilon
-        self.anchors = torch.FloatTensor([k-i for i in range(k+1)]).view([1,1, k+1])
         self.max_iter = max_iter
-        
-        if torch.cuda.is_available():
-            self.anchors = self.anchors.cuda()
+        self.anchors = torch.FloatTensor([k-i for i in range(k+1)]).view([1,1,k+1])  # 初始化时不指定设备
 
     def forward(self, scores):
+        device = scores.device  # 获取scores的设备
+        self.anchors = self.anchors.to(device)  # 确保anchors在正确的设备上
+
         bs, n = scores.size()
         scores = scores.view([bs, n, 1])
-        
-        #find the -inf value and replace it with the minimum value except -inf
+
+        # 对scores进行处理，确保所有操作在scores的设备上执行
         scores_ = scores.clone().detach()
         max_scores = torch.max(scores_).detach()
         scores_[scores_==float('-inf')] = float('inf')
@@ -133,18 +131,14 @@ class TopK_custom(torch.nn.Module):
         
         C = (scores-self.anchors)**2
         C = C / (C.max().detach())
-      
-        mu = torch.ones([1, n, 1], requires_grad=False)/n
+
+        mu = torch.ones([1, n, 1], dtype=scores.dtype, device=device)/n
         nu = [1./n for _ in range(self.k)]
         nu.append((n-self.k)/n)
-        nu = torch.FloatTensor(nu).view([1, 1, self.k+1])
-        
-        if torch.cuda.is_available():
-            mu = mu.cuda()
-            nu = nu.cuda()
-            
+        nu = torch.FloatTensor(nu).view([1, 1, self.k+1]).to(device)
+
+        # 调用外部的sinkhorn方法（需在适当的地方定义或导入）
         Gamma = TopKFunc.apply(C, mu, nu, self.epsilon, self.max_iter)
- 
+
         A = Gamma[:,:,:self.k]*n
-        
         return A
