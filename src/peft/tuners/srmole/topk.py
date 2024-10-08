@@ -1,5 +1,4 @@
 import torch
-import matplotlib.pyplot as plt
 from torch.autograd import Function
 import torch.nn.functional as F
 
