@@ -66,11 +66,14 @@ class SRMoLEQuantLinear(torch.nn.Module, SRMoLELayer):
 
             if self.training:
                 router_output_flat = router_output.view(-1, router_output.size(-1))
-                p, _ = self.soft_topk(router_output_flat)
-                p = p.sum(dim=-1)
+                p = self.soft_topk(router_output_flat)
+                p = p.sum(dim=2)
                 p = p.view(router_output.size(0), router_output.size(1), -1) # shape (b,s,r)
-                selected_lora_A_weight = torch.einsum("rd,bsr->bsrd", lora_A_weight, p)
-                selected_lora_B_weight = torch.einsum("dr,bsr->bsdr", lora_B_weight, p)
+                
+                mid_output = torch.einsum("bsd,rd->bsr", (dropout(x), lora_A_weight))
+                lora_outpout = torch.einsum("bsr,dr->bsrd", (mid_output, lora_B_weight))
+                lora_outpout = torch.einsum("bsrd,bsr->bsd", (mid_output, p))
+                
             else:
                 # 选择 top activate_r 参数基于 softmax 得分
                 _, indices = torch.topk(router_output, self.activate_r[active_adapter], dim=2)  # indices 形状为 (b, s, k)
@@ -82,16 +85,15 @@ class SRMoLEQuantLinear(torch.nn.Module, SRMoLELayer):
                 selected_lora_B_weight = lora_B_weight[:, indices]  # 形状为 (d, b, s, k)
                 selected_lora_B_weight = selected_lora_B_weight.permute(1, 2, 0, 3)  # 变为 (b, s, d, k)
 
-            # 计算 selected_lora_A_output
-            selected_lora_A_output = torch.einsum("bsd,bskd->bsk", (dropout(x), selected_lora_A_weight))  # (b, s, k)
+                # 计算 selected_lora_A_output
+                selected_lora_A_output = torch.einsum("bsd,bskd->bsk", (dropout(x), selected_lora_A_weight))  # (b, s, k)
 
-            # 计算 selected_lora_B_output
-            selected_lora_B_output = torch.einsum("bsk,bsdk->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
-            if requires_conversion:
-                selected_lora_B_output = selected_lora_B_output.to(expected_dtype)
+                # 计算 selected_lora_B_output
+                lora_outpout = torch.einsum("bsk,bsdk->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
+                if requires_conversion:
+                    lora_outpout = lora_outpout.to(expected_dtype)
 
-            result = result + selected_lora_B_output * scaling
-
+                result = result + lora_outpout * scaling
         return result
 
     def __repr__(self) -> str:

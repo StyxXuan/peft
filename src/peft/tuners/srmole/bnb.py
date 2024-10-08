@@ -75,11 +75,14 @@ if is_bnb_available():
 
                 if self.training:
                     router_output_flat = router_output.view(-1, router_output.size(-1))
-                    p = self.soft_topk(torch.log(router_output_flat))
-                    p = p.sum(dim=-1)
+                    p = self.soft_topk(router_output_flat)
+                    p = p.sum(dim=2)
                     p = p.view(router_output.size(0), router_output.size(1), -1) # shape (b,s,r)
-                    selected_lora_A_weight = torch.einsum("rd,bsr->bsrd", lora_A_weight, p)
-                    selected_lora_B_weight = torch.einsum("dr,bsr->bsdr", lora_B_weight, p)
+                    
+                    mid_output = torch.einsum("bsd,rd->bsr", (dropout(x), lora_A_weight))
+                    mid_output = torch.einsum("bsr,dr->bsrd", (mid_output, lora_B_weight))
+                    lora_outpout = torch.einsum("bsrd,bsr->bsd", (mid_output, p))
+                    
                 else:
                     # 选择 top activate_r 参数基于 softmax 得分
                     _, indices = torch.topk(router_output, self.activate_r[active_adapter], dim=2)  # indices 形状为 (b, s, k)
@@ -91,15 +94,16 @@ if is_bnb_available():
                     selected_lora_B_weight = lora_B_weight[:, indices]  # 形状为 (d, b, s, k)
                     selected_lora_B_weight = selected_lora_B_weight.permute(1, 2, 0, 3)  # 变为 (b, s, d, k)
 
-                # 计算 selected_lora_A_output
-                selected_lora_A_output = torch.einsum("bsd,bskd->bsk", (dropout(x), selected_lora_A_weight))  # (b, s, k)
+                    # 计算 selected_lora_A_output
+                    selected_lora_A_output = torch.einsum("bsd,bskd->bsk", (dropout(x), selected_lora_A_weight))  # (b, s, k)
 
-                # 计算 selected_lora_B_output
-                selected_lora_B_output = torch.einsum("bsk,bsdk->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
+                    # 计算 selected_lora_B_output
+                    lora_outpout = torch.einsum("bsk,bsdk->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
+                # 更新结果
                 if requires_conversion:
-                    selected_lora_B_output = selected_lora_B_output.to(expected_dtype)
+                    lora_outpout = lora_outpout.to(expected_dtype)
 
-                result = result + selected_lora_B_output * scaling
+                result = result + lora_outpout * scaling
 
             return result
 
@@ -148,44 +152,46 @@ if is_bnb_4bit_available():
                     if x.dtype != torch.float32:
                         x = x.float()
 
-                lora_A_weight = self.lora_A[active_adapter].weight  # 形状为 (r, d)
-                lora_B_weight = self.lora_B[active_adapter].weight  # 形状为 (d, r)
+            lora_A_weight = self.lora_A[active_adapter].weight  # 形状为 (r, d)
+            lora_B_weight = self.lora_B[active_adapter].weight  # 形状为 (d, r)
 
-                router = self.router[active_adapter]
-                dropout = self.lora_dropout[active_adapter]
-                scaling = self.scaling[active_adapter]
+            router = self.router[active_adapter]
+            dropout = self.lora_dropout[active_adapter]
+            scaling = self.scaling[active_adapter]
 
-                router_output = router(x)  # 形状为 (b, s, r)
-                router_output = F.softmax(router_output, dim=2)  # 在 r 维度上应用 softmax
+            router_output = router(x)  # 形状为 (b, s, r)
+            router_output = F.softmax(router_output, dim=2)  # 在 r 维度上应用 softmax
 
-                if self.training:
-                    router_output_flat = router_output.view(-1, router_output.size(-1))
-                    p = self.soft_topk(router_output_flat)
-                    p = p.sum(dim=-1)
-                    p = p.view(router_output.size(0), router_output.size(1), -1) # shape (b,s,r)
-                    selected_lora_A_weight = torch.einsum("rd,bsr->bsrd", lora_A_weight, p)
-                    selected_lora_B_weight = torch.einsum("dr,bsr->bsdr", lora_B_weight, p)
-                else:
-                    # 选择 top activate_r 参数基于 softmax 得分
-                    _, indices = torch.topk(router_output, self.activate_r[active_adapter], dim=2)  # indices 形状为 (b, s, k)
+            if self.training:
+                router_output_flat = router_output.view(-1, router_output.size(-1))
+                p = self.soft_topk(router_output_flat)
+                p = p.sum(dim=2)
+                p = p.view(router_output.size(0), router_output.size(1), -1) # shape (b,s,r)
+                
+                mid_output = torch.einsum("bsd,rd->bsr", (dropout(x), lora_A_weight))
+                mid_output = torch.einsum("bsr,dr->bsrd", (mid_output, lora_B_weight))
+                lora_outpout = torch.einsum("bsrd,bsr->bsd", (mid_output, p))
+                
+            else:
+                # 选择 top activate_r 参数基于 softmax 得分
+                _, indices = torch.topk(router_output, self.activate_r[active_adapter], dim=2)  # indices 形状为 (b, s, k)
 
-                    # 使用 gather 获取 selected_lora_A_weight 和 selected_lora_B_weight
-                    selected_lora_A_weight = lora_A_weight[indices]  # 形状为 (b, s, k, d)
-                    
-                    # 获取 selected_lora_B_weight，变为 (b, s, k, d)
-                    selected_lora_B_weight = lora_B_weight[:, indices]  # 形状为 (d, b, s, k)
-                    selected_lora_B_weight = selected_lora_B_weight.permute(1, 2, 0, 3)  # 变为 (b, s, d, k)
-
+                # 使用 gather 获取 selected_lora_A_weight 和 selected_lora_B_weight
+                selected_lora_A_weight = lora_A_weight[indices]  # 形状为 (b, s, k, d)
+                
+                # 获取 selected_lora_B_weight，变为 (b, s, k, d)
+                selected_lora_B_weight = lora_B_weight[:, indices]  # 形状为 (d, b, s, k)
+                selected_lora_B_weight = selected_lora_B_weight.permute(1, 2, 0, 3)  # 变为 (b, s, d, k)
 
                 # 计算 selected_lora_A_output
                 selected_lora_A_output = torch.einsum("bsd,bskd->bsk", (dropout(x), selected_lora_A_weight))  # (b, s, k)
 
                 # 计算 selected_lora_B_output
-                selected_lora_B_output = torch.einsum("bsk,bsdk->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
+                lora_outpout = torch.einsum("bsk,bsdk->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
                 if requires_conversion:
-                    selected_lora_B_output = selected_lora_B_output.to(expected_dtype)
+                    lora_outpout = lora_outpout.to(expected_dtype)
 
-                result = result + selected_lora_B_output * scaling
+                result = result + lora_outpout * scaling
 
             return result
 
