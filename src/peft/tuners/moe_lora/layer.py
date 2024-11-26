@@ -140,16 +140,9 @@ class MoELoRALinear(nn.Module, MoELoRALayer):
                     # 训练阶段，使用 Gumbel-Softmax，hard=False，使用 soft routing
                     router_probs = F.gumbel_softmax(router_logits, tau=0.1, hard=False, dim=-1)  # (b, s, n)
                     
-                    # 使用 torch.matmul 进行加权求和
-                    # （在训练阶段，这是必要的，以确保梯度能够传回所有专家）
-
-                    lora_A_weight_flat = lora_A_weight.view(lora_A_weight.shape[0], -1)  # (n, r*d)
-                    lora_B_weight_flat = lora_B_weight.view(lora_B_weight.shape[0], -1)  # (n, d*r)
-
-                    selected_lora_A_weight_flat = torch.matmul(router_probs, lora_A_weight_flat)  # (b, s, r*d)
-                    selected_lora_B_weight_flat = torch.matmul(router_probs, lora_B_weight_flat)  # (b, s, d*r)
-                    selected_lora_A_weight = selected_lora_A_weight_flat.view(-1, x.size(1), lora_A_weight.shape[1], lora_A_weight.shape[2])  # (b, s, r, d)
-                    selected_lora_B_weight = selected_lora_B_weight_flat.view(-1, x.size(1), lora_B_weight.shape[1], lora_B_weight.shape[2])  # (b, s, d, r)
+                    mid_res = torch.einsum("bsd,nrd->bsnr", (dropout(x), lora_A_weight))
+                    mid_res = torch.einsum("bsnr,ndr->bsnd", (mid_res, lora_B_weight))
+                    lora_output = torch.einsum("bsnd,bsn->bsd", (mid_res, router_logits))
 
                 else:
                     # 推理阶段，使用 Gumbel-Softmax，hard=True，使用 hard routing
@@ -162,9 +155,9 @@ class MoELoRALinear(nn.Module, MoELoRALayer):
                     selected_lora_A_weight = lora_A_weight[indices]  # (b, s, r, d)
                     selected_lora_B_weight = lora_B_weight[indices]  # (b, s, d, r)
 
-                selected_lora_A_output = torch.einsum("bsd,bsrd->bsr", (dropout(x), selected_lora_A_weight))  # (b, s, k)
-                selected_lora_B_output = torch.einsum("bsr,bsdr->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
-                result = result + selected_lora_B_output * scaling
+                    selected_lora_A_output = torch.einsum("bsd,bsrd->bsr", (dropout(x), selected_lora_A_weight))  # (b, s, k)
+                    lora_output = torch.einsum("bsr,bsdr->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
+                result = result + lora_output * scaling
                 
         return result
 

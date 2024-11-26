@@ -61,39 +61,32 @@ class SRMoLEQuantLinear(torch.nn.Module, SRMoLELayer):
             dropout = self.lora_dropout[active_adapter]
             scaling = self.scaling[active_adapter]
 
-            router_output = router(x)  # 形状为 (b, s, r)
-            router_output = F.softmax(router_output, dim=2)  # 在 r 维度上应用 softmax
+            gating_output, indices = router(x)  # 形状为 (b, s, r)
 
-            if self.training:
-                router_output_flat = router_output.view(-1, router_output.size(-1))
-                p = self.soft_topk(router_output_flat)
-                p = p.sum(dim=2)
-                p = p.view(router_output.size(0), router_output.size(1), -1) # shape (b,s,r)
-                
-                mid_output = torch.einsum("bsd,rd->bsr", (dropout(x), lora_A_weight))
-                lora_outpout = torch.einsum("bsr,dr->bsrd", (mid_output, lora_B_weight))
-                lora_outpout = torch.einsum("bsrd,bsr->bsd", (mid_output, p))
-                
-            else:
-                # 选择 top activate_r 参数基于 softmax 得分
-                _, indices = torch.topk(router_output, self.activate_r[active_adapter], dim=2)  # indices 形状为 (b, s, k)
+            lora_outpout = torch.zeros_like(x)
 
-                # 使用 gather 获取 selected_lora_A_weight 和 selected_lora_B_weight
-                selected_lora_A_weight = lora_A_weight[indices]  # 形状为 (b, s, k, d)
-                
-                # 获取 selected_lora_B_weight，变为 (b, s, k, d)
-                selected_lora_B_weight = lora_B_weight[:, indices]  # 形状为 (d, b, s, k)
-                selected_lora_B_weight = selected_lora_B_weight.permute(1, 2, 0, 3)  # 变为 (b, s, d, k)
+            # Reshape inputs for batch processing
+            flat_x = dropout(x).view(-1, x.size(-1))
+            flat_gating_output = gating_output.view(-1, gating_output.size(-1))
+            for i in range(self.r[active_adapter]):
+                # Create a mask for the inputs where the current expert is in top-k
+                expert_mask = (indices == i).any(dim=-1)
+                flat_mask = expert_mask.view(-1)
 
-                # 计算 selected_lora_A_output
-                selected_lora_A_output = torch.einsum("bsd,bskd->bsk", (dropout(x), selected_lora_A_weight))  # (b, s, k)
+                if flat_mask.any():
+                    expert_input = flat_x[flat_mask]
+                    expert_output = expert_input @ lora_A_weight[i].unsqueeze(0).t()
+                    expert_output = expert_output @ lora_B_weight[:,i].unsqueeze(0)
+                    # Extract and apply gating scores
+                    gating_scores = flat_gating_output[flat_mask, i].unsqueeze(1)
+                    weighted_output = expert_output * gating_scores
+                    # Update final output additively by indexing and adding
+                    lora_outpout[expert_mask] += weighted_output.squeeze(1)
 
-                # 计算 selected_lora_B_output
-                lora_outpout = torch.einsum("bsk,bsdk->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
-                if requires_conversion:
-                    lora_outpout = lora_outpout.to(expected_dtype)
+            if requires_conversion:
+                lora_outpout = lora_outpout.to(expected_dtype)
 
-                result = result + lora_outpout * scaling
+            result = result + lora_outpout * scaling
         return result
 
     def __repr__(self) -> str:

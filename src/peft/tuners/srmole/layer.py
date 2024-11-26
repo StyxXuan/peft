@@ -25,11 +25,26 @@ from peft.tuners.lora import LoraLayer
 from peft.tuners.tuners_utils import check_adapters_to_merge
 from peft.utils import transpose
 from .topk import TopK_custom
+import time
 
 if packaging.version.parse(transformers.__version__) >= packaging.version.parse("4.33.0"):
     from transformers.integrations import deepspeed_config
 else:
     from transformers.deepspeed import deepspeed_config
+
+class TopkRouter(nn.Module):
+    def __init__(self, n_embed, num_experts, top_k):
+        super(TopkRouter, self).__init__()
+        self.top_k = top_k
+        self.linear =nn.Linear(n_embed, num_experts)
+       
+    def forward(self, x):
+        logits = self.linear(x)
+        top_k_logits, indices = logits.topk(self.top_k, dim=-1)
+        zeros = torch.full_like(logits, float('-inf'))
+        sparse_logits = zeros.scatter(-1, indices, top_k_logits)
+        router_output = F.softmax(sparse_logits, dim=-1)
+        return router_output, indices
 
 
 class SRMoLELayer(LoraLayer):
@@ -65,7 +80,7 @@ class SRMoLELayer(LoraLayer):
         self.lora_B[adapter_name] = nn.Linear(r, self.out_features, bias=False)
 
         # The current rank
-        self.router[adapter_name] = nn.Linear(self.in_features, r, bias=False)
+        self.router[adapter_name] = TopkRouter(self.in_features, r, activate_r)
         self.scaling[adapter_name] = lora_alpha / activate_r
 
         if init_lora_weights:
@@ -122,39 +137,45 @@ class SRMoLELinear(nn.Module, SRMoLELayer):
                 router = self.router[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
+                lora_A = self.lora_A[active_adapter]
+                lora_B = self.lora_B[active_adapter]
 
-                router_output = router(x)  # 形状为 (b, s, r)
-                router_output = F.softmax(router_output, dim=2)  # 在 r 维度上应用 softmax
+                                # 直接计算
+                start_time = time.time()
+                direct_result = result + lora_B(lora_A(dropout(x))) * scaling
+                direct_time = time.time() - start_time
 
-                if self.training:
-                    router_output_flat = router_output.view(-1, router_output.size(-1))
-                    p = self.soft_topk(router_output_flat)
-                    p = p.sum(dim=2)
-                    p = p.view(router_output.size(0), router_output.size(1), -1) # shape (b,s,r)
-                    
-                    mid_output = torch.einsum("bsd,rd->bsr", (dropout(x), lora_A_weight))
-                    lora_outpout = torch.einsum("bsr,dr->bsrd", (mid_output, lora_B_weight))
-                    lora_outpout = torch.einsum("bsrd,bsr->bsd", (mid_output, p))
-                    
-                else:
-                    # 选择 top activate_r 参数基于 softmax 得分
-                    _, indices = torch.topk(router_output, self.activate_r[active_adapter], dim=2)  # indices 形状为 (b, s, k)
 
-                    # 使用 gather 获取 selected_lora_A_weight 和 selected_lora_B_weight
-                    selected_lora_A_weight = lora_A_weight[indices]  # 形状为 (b, s, k, d)
-                    
-                    # 获取 selected_lora_B_weight，变为 (b, s, k, d)
-                    selected_lora_B_weight = lora_B_weight[:, indices]  # 形状为 (d, b, s, k)
-                    selected_lora_B_weight = selected_lora_B_weight.permute(1, 2, 0, 3)  # 变为 (b, s, d, k)
+                start_time = time.time()
 
-                    # 计算 selected_lora_A_output
-                    selected_lora_A_output = torch.einsum("bsd,bskd->bsk", (dropout(x), selected_lora_A_weight))  # (b, s, k)
+                # Reshape inputs for batch processing
+                flat_x = dropout(x).view(-1, x.size(-1))
+                gating_output, indices = router(x)  # 形状为 (b, s, r)
 
-                    # 计算 selected_lora_B_output
-                    lora_outpout = torch.einsum("bsk,bsdk->bsd", (selected_lora_A_output, selected_lora_B_weight))  # (b, s, d)
-                # 更新结果
-                result = result + lora_outpout * scaling
+                final_output = torch.zeros_like(x)
+
+                # Reshape inputs for batch processing
+                flat_x = dropout(x).view(-1, x.size(-1))
+                flat_gating_output = gating_output.view(-1, gating_output.size(-1))
+                for i in range(self.r[active_adapter]):
+                    # Create a mask for the inputs where the current expert is in top-k
+                    expert_mask = (indices == i).any(dim=-1)
+                    flat_mask = expert_mask.view(-1)
+
+                    if flat_mask.any():
+                        expert_input = flat_x[flat_mask]
+                        expert_output = expert_input @ lora_A_weight[i].unsqueeze(0).t()
+                        expert_output = expert_output @ lora_B_weight[:,i].unsqueeze(0)
+                        # Extract and apply gating scores
+                        gating_scores = flat_gating_output[flat_mask, i].unsqueeze(1)
+                        weighted_output = expert_output * gating_scores
+                        # Update final output additively by indexing and adding
+                        final_output[expert_mask] += weighted_output.squeeze(1)
                 
+                result = result + final_output * scaling
+                srmole_time = time.time() - start_time
+                print("start_time: {}; direct_time: {}; srmole_time: {}".format(start_time, direct_time, srmole_time))
+        
         return result
 
     def __repr__(self) -> str:
