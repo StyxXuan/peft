@@ -16,8 +16,6 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from .idx_matmul_A import IndexedMatMul_A
-from .idx_matmul_B import IndexedMatMul_B
 
 from peft.import_utils import is_bnb_4bit_available, is_bnb_available
 
@@ -65,44 +63,39 @@ if is_bnb_available():
                     if x.dtype != torch.float32:
                         x = x.float()
 
-                lora_A = self.lora_A[active_adapter]
-                lora_B = self.lora_B[active_adapter]
+                lora_A_weight = self.lora_A[active_adapter].weight  # 形状为 (r, d)
+                lora_B_weight = self.lora_B[active_adapter].weight  # 形状为 (d, r)
+
                 router = self.router[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
 
-                # 获取路由结果
-                x_dropped = dropout(x)  # [batch_size, seq_len,in_features]
-                gating_output, indices = router(x)  # gating_output: [batch_size, seq_len, r], indices: [batch_size, seq_len, k]
+                gating_output, indices = router(x)  # 形状为 (b, s, r)
 
-                # flaten
-                x_dropped = x_dropped.view(-1, x_dropped.size(-1)) # [batch_size*seq_len, in_features]
-                gating_output = gating_output.view(-1, gating_output.size(-1)) # [batch_size*seq_len, r]
-                indices = indices.view(-1, indices.size(-1)).to(torch.int32) # [batch_size*seq_len, k]
-                
-                # 使用 IndexedMatMul 进行计算
-                # 1. 准备权重
-                A = lora_A.weight  # [r, in_features]
-                B = lora_B.weight  # [out_features, r]
+                lora_outpout = torch.zeros_like(x)
 
-                # 2. 第一步矩阵乘法：x @ A[indices]
-                intermediate = IndexedMatMul_A.apply(x_dropped, indices, A)  # [batch_size*seq_len, k]
-                
-                # 3. 应用 gating scores
-                selected_gates = torch.gather(gating_output, 1, indices.to(torch.int64))  # [batch_size*seq_len, k]
-                gated_intermediate = intermediate * selected_gates  # [batch_size*seq_len, k]
-                gated_intermediate = gated_intermediate.to(x_dropped.dtype)
-                
-                # 4. 第二步矩阵乘法：(x @ A[indices]) @ B[:, indices]
-                output = IndexedMatMul_B.apply(gated_intermediate, indices.to(torch.int32), B)  # [batch_size*seq_len, out_features]
+                # Reshape inputs for batch processing
+                flat_x = dropout(x).view(-1, x.size(-1))
+                flat_gating_output = gating_output.view(-1, gating_output.size(-1))
+                for i in range(self.r[active_adapter]):
+                    # Create a mask for the inputs where the current expert is in top-k
+                    expert_mask = (indices == i).any(dim=-1)
+                    flat_mask = expert_mask.view(-1)
 
-                # unflatten
-                output = output.view(x.size(0), x.size(1), output.size(-1))
-
+                    if flat_mask.any():
+                        expert_input = flat_x[flat_mask]
+                        expert_output = expert_input @ lora_A_weight[i].unsqueeze(0).t()
+                        expert_output = expert_output @ lora_B_weight[:,i].unsqueeze(0)
+                        # Extract and apply gating scores
+                        gating_scores = flat_gating_output[flat_mask, i].unsqueeze(1)
+                        weighted_output = expert_output * gating_scores
+                        # Update final output additively by indexing and adding
+                        lora_outpout[expert_mask] += weighted_output.squeeze(1)
+                # 更新结果
                 if requires_conversion:
-                    output = output.to(expected_dtype)
-                
-                result = result + output * scaling
+                    lora_outpout = lora_outpout.to(expected_dtype)
+
+                result = result + lora_outpout * scaling
 
             return result
 
@@ -137,6 +130,7 @@ if is_bnb_4bit_available():
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             # note: no check for self.merged because merging is not supported (yet)
+            print("4-bit forward")
             result = self.base_layer(x)
 
             if self.disable_adapters:
@@ -151,44 +145,38 @@ if is_bnb_4bit_available():
                     if x.dtype != torch.float32:
                         x = x.float()
 
-                lora_A = self.lora_A[active_adapter]
-                lora_B = self.lora_B[active_adapter]
+                lora_A_weight = self.lora_A[active_adapter].weight  # 形状为 (r, d)
+                lora_B_weight = self.lora_B[active_adapter].weight  # 形状为 (d, r)
+
                 router = self.router[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
 
-                # 获取路由结果
-                x_dropped = dropout(x)  # [batch_size, seq_len,in_features]
-                gating_output, indices = router(x)  # gating_output: [batch_size, seq_len, r], indices: [batch_size, seq_len, k]
+                gating_output, indices = router(x)  # 形状为 (b, s, r)
 
-                # flaten
-                x_dropped = x_dropped.view(-1, x_dropped.size(-1)) # [batch_size*seq_len, in_features]
-                gating_output = gating_output.view(-1, gating_output.size(-1)) # [batch_size*seq_len, r]
-                indices = indices.view(-1, indices.size(-1)).to(torch.int32) # [batch_size*seq_len, k]
-                
-                # 使用 IndexedMatMul 进行计算
-                # 1. 准备权重
-                A = lora_A.weight  # [r, in_features]
-                B = lora_B.weight  # [out_features, r]
+                lora_outpout = torch.zeros_like(x)
 
-                # 2. 第一步矩阵乘法：x @ A[indices]
-                intermediate = IndexedMatMul_A.apply(x_dropped, indices, A)  # [batch_size*seq_len, k]
-                
-                # 3. 应用 gating scores
-                selected_gates = torch.gather(gating_output, 1, indices.to(torch.int64))  # [batch_size*seq_len, k]
-                gated_intermediate = intermediate * selected_gates  # [batch_size*seq_len, k]
-                gated_intermediate = gated_intermediate.to(x_dropped.dtype)
-                
-                # 4. 第二步矩阵乘法：(x @ A[indices]) @ B[:, indices]
-                output = IndexedMatMul_B.apply(gated_intermediate, indices.to(torch.int32), B)  # [batch_size*seq_len, out_features]
+                # Reshape inputs for batch processing
+                flat_x = dropout(x).view(-1, x.size(-1))
+                flat_gating_output = gating_output.view(-1, gating_output.size(-1))
+                for i in range(self.r[active_adapter]):
+                    # Create a mask for the inputs where the current expert is in top-k
+                    expert_mask = (indices == i).any(dim=-1)
+                    flat_mask = expert_mask.view(-1)
 
-                # unflatten
-                output = output.view(x.size(0), x.size(1), output.size(-1))
-
+                    if flat_mask.any():
+                        expert_input = flat_x[flat_mask]
+                        expert_output = expert_input @ lora_A_weight[i].unsqueeze(0).t()
+                        expert_output = expert_output @ lora_B_weight[:,i].unsqueeze(0)
+                        # Extract and apply gating scores
+                        gating_scores = flat_gating_output[flat_mask, i].unsqueeze(1)
+                        weighted_output = expert_output * gating_scores
+                        # Update final output additively by indexing and adding
+                        lora_outpout[expert_mask] += weighted_output.squeeze(1)
                 if requires_conversion:
-                    output = output.to(expected_dtype)
-                
-                result = result + output * scaling
+                    lora_outpout = lora_outpout.to(expected_dtype)
+
+                result = result + lora_outpout * scaling
 
             return result
 

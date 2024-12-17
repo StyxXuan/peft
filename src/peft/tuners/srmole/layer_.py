@@ -20,8 +20,6 @@ import packaging
 import torch
 import transformers
 from torch import nn
-from .idx_matmul_A import IndexedMatMul_A
-from .idx_matmul_B import IndexedMatMul_B
 
 from peft.tuners.lora import LoraLayer
 from peft.tuners.tuners_utils import check_adapters_to_merge
@@ -133,50 +131,50 @@ class SRMoLELinear(nn.Module, SRMoLELayer):
                 if active_adapter not in self.lora_A.keys():
                     continue
                 
-                lora_A = self.lora_A[active_adapter]
-                lora_B = self.lora_B[active_adapter]
+                lora_A_weight = self.lora_A[active_adapter].weight  # 形状为 (r, d)
+                lora_B_weight = self.lora_B[active_adapter].weight  # 形状为 (d, r)
+
                 router = self.router[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
+                lora_A = self.lora_A[active_adapter]
+                lora_B = self.lora_B[active_adapter]
 
-#                 # 直接计算用于对比
-#                 start_time = time.time()
-#                 direct_result = result + lora_B(lora_A(dropout(x))) * scaling
-#                 direct_time = time.time() - start_time
+                                # 直接计算
+                start_time = time.time()
+                direct_result = result + lora_B(lora_A(dropout(x))) * scaling
+                direct_time = time.time() - start_time
 
-#                 start_time = time.time()
-                
-                # 获取路由结果
-                x_dropped = dropout(x)  # [batch_size, seq_len,in_features]
-                gating_output, indices = router(x)  # gating_output: [batch_size, seq_len, r], indices: [batch_size, seq_len, k]
 
-                # flaten
-                x_dropped = x_dropped.view(-1, x_dropped.size(-1)) # [batch_size*seq_len, in_features]
-                gating_output = gating_output.view(-1, gating_output.size(-1)) # [batch_size*seq_len, r]
-                indices = indices.view(-1, indices.size(-1)).to(torch.int32) # [batch_size*seq_len, k]
-                
-                # 使用 IndexedMatMul 进行计算
-                # 1. 准备权重
-                A = lora_A.weight  # [r, in_features]
-                B = lora_B.weight  # [out_features, r]
+                start_time = time.time()
 
-                # 2. 第一步矩阵乘法：x @ A[indices]
-                intermediate = IndexedMatMul_A.apply(x_dropped.to(torch.float32), indices, A.to(torch.float32))  # [batch_size*seq_len, k]
-                
-                # 3. 应用 gating scores
-                selected_gates = torch.gather(gating_output, 1, indices.to(torch.int64))  # [batch_size*seq_len, k]
-                gated_intermediate = intermediate * selected_gates  # [batch_size*seq_len, k]
-                
-                # 4. 第二步矩阵乘法：(x @ A[indices]) @ B[:, indices]
-                output = IndexedMatMul_B.apply(gated_intermediate.to(torch.float32), indices.to(torch.int32), B.to(torch.float32))  # [batch_size*seq_len, out_features]
+                # Reshape inputs for batch processing
+                flat_x = dropout(x).view(-1, x.size(-1))
+                gating_output, indices = router(x)  # 形状为 (b, s, r)
 
-                # unflatten
-                output = output.view(x.size(0), x.size(1), output.size(-1))
-                output = output.to(result.dtype)
+                final_output = torch.zeros_like(x)
+
+                # Reshape inputs for batch processing
+                flat_x = dropout(x).view(-1, x.size(-1))
+                flat_gating_output = gating_output.view(-1, gating_output.size(-1))
+                for i in range(self.r[active_adapter]):
+                    # Create a mask for the inputs where the current expert is in top-k
+                    expert_mask = (indices == i).any(dim=-1)
+                    flat_mask = expert_mask.view(-1)
+
+                    if flat_mask.any():
+                        expert_input = flat_x[flat_mask]
+                        expert_output = expert_input @ lora_A_weight[i].unsqueeze(0).t()
+                        expert_output = expert_output @ lora_B_weight[:,i].unsqueeze(0)
+                        # Extract and apply gating scores
+                        gating_scores = flat_gating_output[flat_mask, i].unsqueeze(1)
+                        weighted_output = expert_output * gating_scores
+                        # Update final output additively by indexing and adding
+                        final_output[expert_mask] += weighted_output.squeeze(1)
                 
-                result = result + output * scaling
-                # srmole_time = time.time() - start_time
-                # print("direct_time: {}; srmole_time: {}".format(direct_time, srmole_time))
+                result = result + final_output * scaling
+                srmole_time = time.time() - start_time
+                print("start_time: {}; direct_time: {}; srmole_time: {}".format(start_time, direct_time, srmole_time))
         
         return result
 
