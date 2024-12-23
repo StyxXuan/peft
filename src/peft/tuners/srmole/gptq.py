@@ -58,13 +58,19 @@ class SRMoLEQuantLinear(torch.nn.Module, SRMoLELayer):
 
             lora_A = self.lora_A[active_adapter]
             lora_B = self.lora_B[active_adapter]
-            router = self.router[active_adapter]
+            lora_router = self.lora_router[active_adapter]
+            activate_r = self.activate_r[active_adapter]
             dropout = self.lora_dropout[active_adapter]
             scaling = self.scaling[active_adapter]
 
             # 获取路由结果
             x_dropped = dropout(x)  # [batch_size, seq_len,in_features]
-            gating_output, indices = router(x)  # gating_output: [batch_size, seq_len, r], indices: [batch_size, seq_len, k]
+            logits = lora_router(x)
+            top_k_logits, indices = logits.topk(activate_r, dim=-1)
+            zeros = torch.full_like(logits, float('-inf'))
+            sparse_logits = zeros.scatter(-1, indices, top_k_logits)
+            gating_output = F.softmax(sparse_logits, dim=-1)
+            # gating_output, indices = router(x)  # gating_output: [batch_size, seq_len, r], indices: [batch_size, seq_len, k]
 
             # flaten
             x_dropped = x_dropped.view(-1, x_dropped.size(-1)) # [batch_size*seq_len, in_features]

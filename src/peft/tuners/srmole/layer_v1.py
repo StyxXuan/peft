@@ -13,14 +13,13 @@
 # limitations under the License.
 
 import warnings
-from typing import Any, List, Optional, Union, Tuple
+from typing import Any, List, Optional
 import torch.nn.functional as F
 import math
 import packaging
 import torch
 import transformers
 from torch import nn
-from torch.autograd import Variable  
 from .idx_matmul_A import IndexedMatMul_A
 from .idx_matmul_B import IndexedMatMul_B
 
@@ -36,7 +35,6 @@ else:
     from transformers.deepspeed import deepspeed_config
 
 
-
 class SRMoLELayer(LoraLayer):
     # List all names of layers that may contain adapter weights
     adapter_layer_names = ("lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B", "lora_router")
@@ -46,7 +44,7 @@ class SRMoLELayer(LoraLayer):
     def __init__(self, base_layer: nn.Module) -> None:
         super().__init__(base_layer)
         self.activate_r = {}
-        self.lora_router = nn.ParameterDict({})
+        self.lora_router = nn.ModuleDict({})
 
 
     def update_layer(self, adapter_name, r, activate_r, lora_alpha, lora_dropout, init_lora_weights):
@@ -102,13 +100,12 @@ class SRMoLELinear(nn.Module, SRMoLELayer):
         super().__init__()
         SRMoLELayer.__init__(self, base_layer)
         # Freezing the pre-trained weight matrix
-        self.get_base_layer().weight.requires_grad = False
+        # self.get_base_layer().weight.requires_grad = False
 
         self.fan_in_fan_out = fan_in_fan_out
         self._active_adapter = adapter_name
         self.update_layer(adapter_name, r, activate_r, lora_alpha, lora_dropout, init_lora_weights)
         self.soft_topk = TopK_custom(activate_r)
-        # self.expert_dropout_rate = 0.2
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
         if self.disable_adapters:
@@ -126,28 +123,27 @@ class SRMoLELinear(nn.Module, SRMoLELayer):
                 lora_A = self.lora_A[active_adapter]
                 lora_B = self.lora_B[active_adapter]
                 lora_router = self.lora_router[active_adapter]
+                for name, param in lora_router.named_parameters():  
+                    print(f"{name}: requires_grad = {param.requires_grad}")
                 activate_r = self.activate_r[active_adapter]
-                r = self.r[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
 
+#                 # 直接计算用于对比
+#                 start_time = time.time()
+#                 direct_result = result + lora_B(lora_A(dropout(x))) * scaling
+#                 direct_time = time.time() - start_time
 
+#                 start_time = time.time()
+                
+                # 获取路由结果
+                # print(x.requires_grad)
                 x_dropped = dropout(x)  # [batch_size, seq_len,in_features]
                 logits = lora_router(x_dropped)
-                # if self.training and self.expert_dropout_rate > 0.0:
-                #     # 生成 dropout 掩码，部分专家的 logits 设为 -inf 以使其在 topk 中被排除
-                #     dropout_mask = torch.bernoulli(torch.ones_like(logits) * (1 - self.expert_dropout_rate)).to(logits.device)
-                #     logits = logits.masked_fill(dropout_mask == 0, float('-inf'))
-
-
+                # exit(0)
                 top_k_logits, indices = logits.topk(activate_r, dim=-1)
-                # with open("indices.txt", "w") as f:
-                #     for i in range(indices.size(0)):  # batch_size
-                #         for j in range(indices.size(1)):  # seq_len
-                #             for k in range(indices.size(2)):  # top_k
-                #                 f.write(str(indices[i][j][k].item()) + " ")
-                #             f.write("\n")
-                #         f.write("\n---\n")
+
+                
                 zeros = torch.full_like(logits, float('-inf'))
                 sparse_logits = zeros.scatter(-1, indices, top_k_logits)
                 gating_output = F.softmax(sparse_logits, dim=-1)
@@ -179,8 +175,13 @@ class SRMoLELinear(nn.Module, SRMoLELayer):
                 output = output.to(result.dtype)
                 
                 result = result + output * scaling
-               
-        return result
+                # srmole_time = time.time() - start_time
+                # print("direct_time: {}; srmole_time: {}".format(direct_time, srmole_time))
+        if self.training:
+            logits_flattened = logits.view(-1, logits.size(-1))
+            return result, logits_flattened
+        else:
+            return result
 
     def __repr__(self) -> str:
         rep = super().__repr__()

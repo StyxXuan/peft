@@ -108,7 +108,7 @@ class SRMoLELinear(nn.Module, SRMoLELayer):
         self._active_adapter = adapter_name
         self.update_layer(adapter_name, r, activate_r, lora_alpha, lora_dropout, init_lora_weights)
         self.soft_topk = TopK_custom(activate_r)
-        # self.expert_dropout_rate = 0.2
+        self.expert_dropout_rate = 0.2
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
         if self.disable_adapters:
@@ -129,55 +129,49 @@ class SRMoLELinear(nn.Module, SRMoLELayer):
                 activate_r = self.activate_r[active_adapter]
                 r = self.r[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
-                scaling = self.scaling[active_adapter]
-
-
+                # scaling = self.scaling[active_adapter]
+                scaling = self.lora_alpha[active_adapter] / math.sqrt(r) if self.training \
+                    else self.lora_alpha[active_adapter] / math.sqrt(activate_r)
+                
                 x_dropped = dropout(x)  # [batch_size, seq_len,in_features]
                 logits = lora_router(x_dropped)
-                # if self.training and self.expert_dropout_rate > 0.0:
-                #     # 生成 dropout 掩码，部分专家的 logits 设为 -inf 以使其在 topk 中被排除
-                #     dropout_mask = torch.bernoulli(torch.ones_like(logits) * (1 - self.expert_dropout_rate)).to(logits.device)
-                #     logits = logits.masked_fill(dropout_mask == 0, float('-inf'))
 
+                if self.training:
+                    gating_output =  F.softmax(logits, dim=-1) * r
+                    mid = lora_A(dropout(x)) * gating_output
+                    output = lora_B(mid)
+                else: 
 
-                top_k_logits, indices = logits.topk(activate_r, dim=-1)
-                # with open("indices.txt", "w") as f:
-                #     for i in range(indices.size(0)):  # batch_size
-                #         for j in range(indices.size(1)):  # seq_len
-                #             for k in range(indices.size(2)):  # top_k
-                #                 f.write(str(indices[i][j][k].item()) + " ")
-                #             f.write("\n")
-                #         f.write("\n---\n")
-                zeros = torch.full_like(logits, float('-inf'))
-                sparse_logits = zeros.scatter(-1, indices, top_k_logits)
-                gating_output = F.softmax(sparse_logits, dim=-1)
-                gating_output = gating_output * activate_r
-                # gating_output, indices = router(x)  # gating_output: [batch_size, seq_len, r], indices: [batch_size, seq_len, k]
+                    top_k_logits, indices = logits.topk(activate_r, dim=-1)
+                    zeros = torch.full_like(logits, float('-inf'))
+                    sparse_logits = zeros.scatter(-1, indices, top_k_logits)
+                    gating_output = F.softmax(sparse_logits, dim=-1)
+                    gating_output = gating_output * activate_r
 
-                # flaten
-                x_dropped = x_dropped.view(-1, x_dropped.size(-1)) # [batch_size*seq_len, in_features]
-                gating_output = gating_output.view(-1, gating_output.size(-1)) # [batch_size*seq_len, r]
-                indices = indices.view(-1, indices.size(-1)).to(torch.int32) # [batch_size*seq_len, k]
+                    # flaten
+                    x_dropped = x_dropped.view(-1, x_dropped.size(-1)) # [batch_size*seq_len, in_features]
+                    gating_output = gating_output.view(-1, gating_output.size(-1)) # [batch_size*seq_len, r]
+                    indices = indices.view(-1, indices.size(-1)).to(torch.int32) # [batch_size*seq_len, k]
                 
-                # 使用 IndexedMatMul 进行计算
-                # 1. 准备权重
-                A = lora_A.weight  # [r, in_features]
-                B = lora_B.weight  # [out_features, r]
+                    # 使用 IndexedMatMul 进行计算
+                    # 1. 准备权重
+                    A = lora_A.weight  # [r, in_features]
+                    B = lora_B.weight  # [out_features, r]
 
-                # 2. 第一步矩阵乘法：x @ A[indices]
-                intermediate = IndexedMatMul_A.apply(x_dropped.to(torch.float32), indices, A.to(torch.float32))  # [batch_size*seq_len, k]
-                
-                # 3. 应用 gating scores
-                selected_gates = torch.gather(gating_output, 1, indices.to(torch.int64))  # [batch_size*seq_len, k]
-                gated_intermediate = intermediate * selected_gates  # [batch_size*seq_len, k]
-                
-                # 4. 第二步矩阵乘法：(x @ A[indices]) @ B[:, indices]
-                output = IndexedMatMul_B.apply(gated_intermediate.to(torch.float32), indices.to(torch.int32), B.to(torch.float32))  # [batch_size*seq_len, out_features]
+                    # 2. 第一步矩阵乘法：x @ A[indices]
+                    intermediate = IndexedMatMul_A.apply(x_dropped.to(torch.float32), indices, A.to(torch.float32))  # [batch_size*seq_len, k]
+                    
+                    # 3. 应用 gating scores
+                    selected_gates = torch.gather(gating_output, 1, indices.to(torch.int64))  # [batch_size*seq_len, k]
+                    gated_intermediate = intermediate * selected_gates  # [batch_size*seq_len, k]
+                    
+                    # 4. 第二步矩阵乘法：(x @ A[indices]) @ B[:, indices]
+                    output = IndexedMatMul_B.apply(gated_intermediate.to(torch.float32), indices.to(torch.int32), B.to(torch.float32))  # [batch_size*seq_len, out_features]
 
-                # unflatten
-                output = output.view(x.size(0), x.size(1), output.size(-1))
+                    # unflatten
+                    output = output.view(x.size(0), x.size(1), output.size(-1))
+                    
                 output = output.to(result.dtype)
-                
                 result = result + output * scaling
                
         return result
