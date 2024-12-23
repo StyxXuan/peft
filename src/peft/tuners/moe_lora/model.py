@@ -29,11 +29,11 @@ from peft.utils import (
 )
 from peft.utils.integrations import gather_params_ctx
 
-from .gptq import SRMoLEQuantLinear
-from .layer import SRMoLELayer, SRMoLELinear
+from .gptq import MoELoRAQuantLinear
+from .layer import MoELoRALayer, MoELoRALinear
 
 
-class SRMoLEModel(LoraModel):
+class MoELoRAModel(LoraModel):
     """
     Creates AdaLoRA (Adaptive LoRA) model from a pretrained transformers model. Paper:
     https://openreview.net/forum?id=lq62uWRJjiY
@@ -75,8 +75,9 @@ class SRMoLEModel(LoraModel):
         current_key,
     ):
         kwargs = {
-            "r": lora_config.init_r,
-            "activate_r": lora_config.activate_r,
+            "r": lora_config.r,
+            "expert_num": lora_config.expert_num,
+            "routing_strategy": lora_config.routing_strategy,
             "lora_alpha": lora_config.lora_alpha,
             "lora_dropout": lora_config.lora_dropout,
             "fan_in_fan_out": lora_config.fan_in_fan_out,
@@ -95,7 +96,7 @@ class SRMoLEModel(LoraModel):
         #     kwargs["gptq_quantization_config"] = quantization_config
 
         # If it is not an AdaLoraLayer, create a new module, else update it with new adapters
-        if not isinstance(target, SRMoLELayer):
+        if not isinstance(target, MoELoRALayer):
             new_module = self._create_new_module(lora_config, adapter_name, target, **kwargs)
             if adapter_name not in self.active_adapters:
                 # adding an additional adapter: it is not automatically trainable
@@ -105,7 +106,7 @@ class SRMoLEModel(LoraModel):
             target.update_layer(
                 adapter_name,
                 lora_config.init_r,
-                lora_config.activate_r,
+                lora_config.expert_num,
                 lora_config.lora_alpha,
                 lora_config.lora_dropout,
                 lora_config.init_lora_weights,
@@ -117,9 +118,9 @@ class SRMoLEModel(LoraModel):
         if is_bnb_available():
             import bitsandbytes as bnb
 
-            from .bnb import SRMoLELinear8bitLt
+            from .bnb import MoELoRALinear8bitLt
         if is_bnb_4bit_available():
-            from .bnb import SRMoLELinear4bitLt
+            from .bnb import MoELoRALinear4bitLt
 
         gptq_quantization_config = kwargs.get("gptq_quantization_config", None)
         AutoGPTQQuantLinear = get_auto_gptq_quant_linear(gptq_quantization_config)
@@ -141,7 +142,7 @@ class SRMoLEModel(LoraModel):
                     "index": target_base_layer.index,
                 }
             )
-            new_module = SRMoLELinear8bitLt(target, adapter_name, **kwargs)
+            new_module = MoELoRALinear8bitLt(target, adapter_name, **kwargs)
         elif loaded_in_4bit and is_bnb_4bit_available() and isinstance(target_base_layer, bnb.nn.Linear4bit):
             fourbit_kwargs = kwargs.copy()
             fourbit_kwargs.update(
@@ -151,9 +152,9 @@ class SRMoLEModel(LoraModel):
                     "quant_type": target_base_layer.weight.quant_type,
                 }
             )
-            new_module = SRMoLELinear4bitLt(target, adapter_name, **fourbit_kwargs)
+            new_module = MoELoRALinear4bitLt(target, adapter_name, **fourbit_kwargs)
         elif AutoGPTQQuantLinear is not None and isinstance(target, AutoGPTQQuantLinear):
-            new_module = SRMoLEQuantLinear(target, adapter_name, **kwargs)
+            new_module = MoELoRAQuantLinear(target, adapter_name, **kwargs)
         else:
             if isinstance(target_base_layer, torch.nn.Linear):
                 if kwargs["fan_in_fan_out"]:
@@ -174,7 +175,7 @@ class SRMoLEModel(LoraModel):
                     f"Target module {target} is not supported. "
                     f"Currently, only `torch.nn.Linear` and `Conv1D` are supported."
                 )
-            new_module = SRMoLELinear(target, adapter_name, **kwargs)
+            new_module = MoELoRALinear(target, adapter_name, **kwargs)
 
         return new_module
 

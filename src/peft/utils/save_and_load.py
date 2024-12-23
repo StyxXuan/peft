@@ -102,7 +102,7 @@ def get_peft_model_state_dict(
                 config.rank_pattern = rank_pattern
                 to_return = model.resize_state_dict_by_rank_pattern(rank_pattern, to_return, adapter_name)
 
-    elif config.peft_type == PeftType.SRMOLE:
+    elif config.peft_type == PeftType.SRMOLE or config.peft_type == PeftType.MOELORA:
         bias = config.bias
         if bias == "none":
             to_return = {k: state_dict[k] for k in state_dict if "lora_" in k or "router" == k}
@@ -368,6 +368,7 @@ def set_peft_model_state_dict(
         PeftType.HRA,
         PeftType.VBLORA,
         PeftType.SRMOLE,
+        PeftType.MOELORA,
     ):
         peft_model_state_dict = {}
         parameter_prefix = {
@@ -385,6 +386,7 @@ def set_peft_model_state_dict(
             PeftType.HRA: "hra_",
             PeftType.VBLORA: "vblora_",
             PeftType.SRMOLE: "lora_",
+            PeftType.MOELORA: "lora_",
         }[config.peft_type]
         if config.peft_type == PeftType.VBLORA and config.save_only_topk_weights:
             num_vectors, _ = model.vblora_vector_bank[adapter_name].shape

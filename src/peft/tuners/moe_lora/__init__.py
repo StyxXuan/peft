@@ -14,24 +14,24 @@
 
 from peft.import_utils import is_bnb_4bit_available, is_bnb_available
 
-from .config import SRMoLEConfig
-from .gptq import SRMoLEQuantLinear
-from .layer import SRMoLELayer, SRMoLELinear
-from .model import SRMoLEModel
+from .config import MoELoRAConfig
+from .gptq import MoELoRAQuantLinear
+from .layer import MoELoRALayer, MoELoRALinear
+from .model import MoELoRAModel
 
 
-__all__ = ["SRMoLEConfig", "SRMoLELayer", "SRMoLEModel", "SRMoLELinear", "SRMoLEQuantLinear"]
+__all__ = ["MoELoRAConfig", "MoELoRALayer", "MoELoRAModel", "MoELoRALinear", "MoELoRAQuantLinear"]
 
 
 def __getattr__(name):
-    if (name == "SRMoLELinear8bitLt") and is_bnb_available():
-        from .bnb import SRMoLELinear8bitLt
+    if (name == "MoELoRALinear8bitLt") and is_bnb_available():
+        from .bnb import MoELoRALinear8bitLt
 
-        return SRMoLELinear8bitLt
+        return MoELoRALinear8bitLt
 
-    if (name == "SRMoLELinear4bitLt") and is_bnb_4bit_available():
-        from .bnb import SRMoLELinear4bitLt
+    if (name == "MoELoRALinear4bitLt") and is_bnb_4bit_available():
+        from .bnb import MoELoRALinear4bitLt
 
-        return SRMoLELinear4bitLt
+        return MoELoRALinear4bitLt
 
     raise AttributeError(f"module {__name__} has no attribute {name}")

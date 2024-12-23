@@ -21,36 +21,18 @@ from peft.utils import PeftType
 
 
 @dataclass
-class SRMoLEConfig(LoraConfig):
+class MoELoRAConfig(LoraConfig):
     """
     This is the configuration class to store the configuration of a [`~peft.AdaLora`].
 
     Args:
-        target_r (`int`): The target average rank of incremental matrix.
-        init_r (`int`): The initial rank for each incremental matrix.
-        tinit (`int`): The steps of initial fine-tuning warmup.
-        tfinal (`int`): The step of final fine-tuning.
-        deltaT (`int`): The time internval between two budget allocations.
-        beta1 (`float`): The hyperparameter of EMA for sensitivity smoothing.
-        beta2 (`float`): The hyperparameter of EMA for undertainty quantification.
-        orth_reg_weight (`float`): The coefficient of orthogonal regularization.
-        total_step (`int`): The total training steps that should be specified before training.
-        rank_pattern (`list`): The allocated rank for each weight matrix by RankAllocator.
+        activate_r (`int`): The target average rank of incremental matrix.
     """
 
-    expert_num: int = field(default=8, metadata={"help": "Number of LoRA experts."})
-    init_r: int = field(default=12, metadata={"help": "Initial Lora matrix dimension."})
-    tinit: int = field(default=0, metadata={"help": "The steps of initial warmup."})
-    tfinal: int = field(default=0, metadata={"help": "The steps of final warmup."})
-    deltaT: int = field(default=1, metadata={"help": "Step interval of rank allocation."})
-    beta1: float = field(default=0.85, metadata={"help": "Hyperparameter of EMA."})
-    beta2: float = field(default=0.85, metadata={"help": "Hyperparameter of EMA."})
-    orth_reg_weight: float = field(default=0.5, metadata={"help": "The orthogonal regularization coefficient."})
-    total_step: Optional[int] = field(default=None, metadata={"help": "The total training steps."})
-    rank_pattern: Optional[dict] = field(default=None, metadata={"help": "The saved rank pattern."})
+    expert_num: int = field(default=8, metadata={"help": "Target Lora matrix dimension."})
 
     def __post_init__(self):
-        self.peft_type = PeftType.SRMOLE
+        self.peft_type = PeftType.MOELORA
 
         if self.use_dora:
             raise ValueError(f"{self.peft_type} does not support DoRA.")
@@ -69,9 +51,3 @@ class SRMoLEConfig(LoraConfig):
         if isinstance(self.target_modules, str) and self.layers_pattern is not None:
             raise ValueError("`layers_pattern` cannot be used when `target_modules` is a str.")
 
-        # Check if 'r' has been set to a non-default value
-        if self.r != 8:  # 8 is the default value for 'r' in LoraConfig
-            warnings.warn(
-                "Note that `r` is not used in AdaLora and will be ignored."
-                "If you intended to set the initial rank, use `init_r` instead."
-            )
