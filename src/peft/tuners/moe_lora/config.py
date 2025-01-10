@@ -24,12 +24,10 @@ from peft.utils import PeftType
 class MoELoRAConfig(LoraConfig):
     """
     This is the configuration class to store the configuration of a [`~peft.AdaLora`].
-
-    Args:
-        activate_r (`int`): The target average rank of incremental matrix.
     """
 
     expert_num: int = field(default=8, metadata={"help": "Target Lora matrix dimension."})
+    routing_strategy: str = field(default="top-1", metadata={"help": "Target Lora matrix dimension."})
 
     def __post_init__(self):
         self.peft_type = PeftType.MOELORA

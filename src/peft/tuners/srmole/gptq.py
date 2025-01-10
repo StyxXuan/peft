@@ -26,6 +26,8 @@ class SRMoLEQuantLinear(torch.nn.Module, SRMoLELayer):
         adapter_name: str,
         r: int = 0,
         activate_r: int = 0,
+        epsilon_greedy: bool = False,
+        rank_partition: int = 1,
         lora_alpha: int = 1,
         lora_dropout: float = 0.0,
         init_lora_weights: bool = True,
@@ -37,7 +39,7 @@ class SRMoLEQuantLinear(torch.nn.Module, SRMoLELayer):
         # for backwards compatibility
         self.quant_linear_module = base_layer
         self._active_adapter = adapter_name
-        self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights)
+        self.update_layer(adapter_name, r, activate_r, epsilon_greedy, rank_partition, lora_alpha, lora_dropout, init_lora_weights)
         self.soft_topk = TopK_custom(activate_r)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -60,6 +62,8 @@ class SRMoLEQuantLinear(torch.nn.Module, SRMoLELayer):
             lora_B = self.lora_B[active_adapter]
             lora_router = self.lora_router[active_adapter]
             activate_r = self.activate_r[active_adapter]
+            epsilon_greedy = self.epsilon_greedy[active_adapter]
+            rank_partition = self.rank_partition[active_adapter]
             dropout = self.lora_dropout[active_adapter]
             scaling = self.scaling[active_adapter]
 

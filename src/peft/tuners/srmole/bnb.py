@@ -35,6 +35,8 @@ if is_bnb_available():
             adapter_name: str,
             r: int = 0,
             activate_r: int = 0,
+            epsilon_greedy: bool = False,
+            rank_partition: int = 1,
             lora_alpha: int = 1,
             lora_dropout: float = 0.0,
             init_lora_weights: bool = True,
@@ -46,7 +48,7 @@ if is_bnb_available():
             self.get_base_layer().weight.requires_grad = False
 
             self._active_adapter = adapter_name
-            self.update_layer(adapter_name, r, activate_r, lora_alpha, lora_dropout, init_lora_weights)
+            self.update_layer(adapter_name, r, activate_r, epsilon_greedy, rank_partition, lora_alpha, lora_dropout, init_lora_weights)
             self.soft_topk = TopK_custom(activate_r)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -69,6 +71,8 @@ if is_bnb_available():
                 lora_B = self.lora_B[active_adapter]
                 lora_router = self.lora_router[active_adapter]
                 activate_r = self.activate_r[active_adapter]
+                epsilon_greedy = self.epsilon_greedy[active_adapter]
+                rank_partition = self.rank_partition[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
 
@@ -127,6 +131,8 @@ if is_bnb_4bit_available():
             adapter_name: str,
             r: int = 0,
             activate_r: int = 0,
+            epsilon_greedy: int = 0,
+            rank_partition: int = 1,
             lora_alpha: int = 1,
             lora_dropout: float = 0.0,
             init_lora_weights: bool = True,
@@ -138,7 +144,7 @@ if is_bnb_4bit_available():
             self.get_base_layer().weight.requires_grad = False
 
             self._active_adapter = adapter_name
-            self.update_layer(adapter_name, r, activate_r, lora_alpha, lora_dropout, init_lora_weights)
+            self.update_layer(adapter_name, r, activate_r, epsilon_greedy, rank_partition, lora_alpha, lora_dropout, init_lora_weights)
             self.soft_topk = TopK_custom(activate_r)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -161,6 +167,8 @@ if is_bnb_4bit_available():
                 lora_B = self.lora_B[active_adapter]
                 lora_router = self.lora_router[active_adapter]
                 activate_r = self.activate_r[active_adapter]
+                epsilon_greedy = self.epsilon_greedy[active_adapter]
+                rank_partition = self.rank_partition[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
 

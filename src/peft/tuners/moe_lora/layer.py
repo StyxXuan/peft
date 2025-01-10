@@ -44,6 +44,9 @@ class MoELoRALayer(LoraLayer):
         self.expert_num = {}
         self.routing_strategy = {}
         self.lora_router = nn.ParameterDict({})
+        
+        self.lora_A = nn.ParameterDict()
+        self.lora_B = nn.ParameterDict()
 
 
     def update_layer(self, adapter_name, r, expert_num, routing_strategy, lora_alpha, lora_dropout, init_lora_weights):
@@ -64,6 +67,7 @@ class MoELoRALayer(LoraLayer):
 
         # Actual trainable parameters
         # Right singular vectors
+
         self.lora_A[adapter_name] = nn.Parameter(
             torch.empty(
                 expert_num,
@@ -71,7 +75,6 @@ class MoELoRALayer(LoraLayer):
                 r,
             )
         )
-
 
         self.lora_B[adapter_name] = nn.Parameter(
             torch.empty(
@@ -93,8 +96,12 @@ class MoELoRALayer(LoraLayer):
 
     def reset_lora_parameters(self, adapter_name):
         if adapter_name in self.lora_A.keys():
-            nn.init.kaiming_uniform_(self.lora_A[adapter_name].weight, a=math.sqrt(5))
-            nn.init.zeros_(self.lora_B[adapter_name].weight)
+            expert_num, d, r = self.lora_A[adapter_name].shape
+            for i in range(expert_num):
+                param = torch.empty((r, d))
+                torch.nn.init.kaiming_uniform_(param, a=math.sqrt(5))
+                self.lora_A[adapter_name].data[i, :, :] = param.T        
+            nn.init.zeros_(self.lora_B[adapter_name])
 
 class MoELoRALinear(nn.Module, MoELoRALayer):
     # SVD-based adaptation by a dense layer
@@ -118,7 +125,7 @@ class MoELoRALinear(nn.Module, MoELoRALayer):
 
         self.fan_in_fan_out = fan_in_fan_out
         self._active_adapter = adapter_name
-        self.update_layer(adapter_name, r, expert_num, lora_alpha, lora_dropout, init_lora_weights)
+        self.update_layer(adapter_name, r, expert_num, routing_strategy, lora_alpha, lora_dropout, init_lora_weights)
         self.routing_strategy = routing_strategy
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
@@ -156,15 +163,12 @@ class MoELoRALinear(nn.Module, MoELoRALayer):
                     # ================== Top-1 (One-hot) ==================
                     # 先对 expert 维度做 softmax，得到概率
                     if self.training:
-                        gating_probs = F.gumbel_softmax(logits, tau=self.gumbel_tau, hard=False, dim=-1)
+                        gating_probs = F.gumbel_softmax(logits, tau=0.1, hard=False, dim=-1)
                         # gating_probs: [B, S, expert_num], 对每个 token 在所有 expert 上的概率分布
 
                         mid = torch.einsum("bsd,edr->bser", x_dropped, lora_A)
                         mid = torch.einsum("bser,erd->bsed", mid, lora_B)
                         res = torch.einsum("bsed,bse->bsd", mid, gating_probs)
-                        # 加到 result
-                        result = result + res * self.scaling
-
                     else:
                         top1_vals, top1_idx = torch.max(logits, dim=-1)  # [B, S]
 
@@ -184,16 +188,16 @@ class MoELoRALinear(nn.Module, MoELoRALayer):
                             # 取出 token
                             x_sel = flat_x[mask]  # [N_e, in_features]
                             # 取出 LoRA
-                            W_A = self.lora_A[e_id]  # [in_features, r]
-                            W_B = self.lora_B[e_id]  # [r, out_features]
+                            W_A = lora_A[e_id]  # [in_features, r]
+                            W_B = lora_B[e_id]  # [r, out_features]
                             local_out = x_sel @ W_A
                             local_out = local_out @ W_B
-                            local_out = local_out * top1_vals.view(-1, 1)[mask]
+                            # local_out = local_out * top1_vals.view(-1, 1)[mask]
                             inc_out[mask] = local_out
 
                         # reshape
                         res = inc_out.view(B, S, self.out_features)
-                    result = result + inc_out * self.scaling
+                    result = result + res * scaling
 
                 elif self.routing_strategy == "top-2":
                     # ================== Top-2 路由 ==================
@@ -222,11 +226,11 @@ class MoELoRALinear(nn.Module, MoELoRALayer):
 
                     # One-hot 编码 selected_experts => [N, 2, expert_num], 再置换到 [expert_num, N, 2]
                     # 也可自己写逻辑手动找 expert id 相等位置，这里和您提供的思路一致
-                    expert_mask = F.one_hot(flat_experts, num_classes=self.expert_num)  # [N, 2, expert_num]
+                    expert_mask = F.one_hot(flat_experts, num_classes=expert_num)  # [N, 2, expert_num]
                     expert_mask = expert_mask.permute(2, 0, 1)  # => [expert_num, N, 2]
 
                     # 遍历全部 expert，收集 token
-                    for e_id in range(self.expert_num):
+                    for e_id in range(expert_num):
                         # expert_mask[e_id] 形状 [N, 2]，有 2 列表示第 0 / 1 个专家
                         # torch.where 可以一次性得到 (idx, col)
                         idx, col = torch.where(expert_mask[e_id])  # idx: token 的位置, col: 0 or 1
@@ -240,8 +244,8 @@ class MoELoRALinear(nn.Module, MoELoRALayer):
                         w_sel = w_sel.unsqueeze(-1)     # => [N_e, 1]
 
                         # 取出该 expert 的 LoRA A, B
-                        W_A = self.lora_A[e_id]  # [in_features, r]
-                        W_B = self.lora_B[e_id]  # [r, out_features]
+                        W_A = lora_A[e_id]  # [in_features, r]
+                        W_B = lora_B[e_id]  # [r, out_features]
 
                         # 一次性计算
                         local_out = x_sel @ W_A  # => [N_e, r]
@@ -253,15 +257,23 @@ class MoELoRALinear(nn.Module, MoELoRALayer):
 
                     # reshape 并加到 result
                     inc_out = inc_out.view(B, S, self.out_features)
-                    result = result + inc_out * self.scaling
-                else: # soft moe
-                    gating_probs = F.softmax(logits, dim=-1, dtype=torch.float)  # [B, S, expert_num]
+                    result = result + inc_out * scaling
+                elif self.routing_strategy == "soft":  # soft moe
+                    gating_probs = F.softmax(logits, dim=-1).to(torch.bfloat16)  # [B, S, expert_num]
                     mid = torch.einsum("bsd,edr->bser", x_dropped, lora_A)
                     mid = torch.einsum("bser,erd->bsed", mid, lora_B)
                     res = torch.einsum("bsed,bse->bsd", mid, gating_probs)
                     # 加到 result
-                    result = result + res * self.scaling
-
+                    result = result + res * scaling
+                else:
+                    # smear
+                    gating_probs = F.softmax(logits, dim=-1, dtype=torch.float)  # [B, S, expert_num]
+                    GA = torch.einsum("bse,edr->bsdr", gating_probs, lora_A)
+                    GB = torch.einsum("bse,erd->bsrd", gating_probs, lora_B)
+                    mid = torch.einsum("bsd,bsdr->bsr", x_dropped, GA)
+                    res = torch.einsum("bsr,bsrd->bsd", mid, GB)
+                    # 加到 result
+                    result = result + res * scaling
 
         return result
 

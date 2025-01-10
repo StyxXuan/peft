@@ -30,6 +30,8 @@ class SRMoLEConfig(LoraConfig):
     """
 
     activate_r: int = field(default=8, metadata={"help": "Target Lora matrix dimension."})
+    epsilon_greedy: bool = field(default=False, metadata={"help": "epsilon_greedy in srmole"})
+    rank_partition: int = field(default=1, metadata={"help": "rank partition in srmole"})
 
     def __post_init__(self):
         self.peft_type = PeftType.SRMOLE

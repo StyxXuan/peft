@@ -72,17 +72,29 @@ class SRMoLEModel(LoraModel):
         target,
         target_name,
         parent,
-        current_key,
-    ):
+        current_key, 
+    ):  
+        # print(current_key)
+        # import re
+        # layer_idx = None
+        # match = re.search(r'layers\.(\d+)\.', current_key)
+        # if match:
+        #     layer_idx = int(match.group(1))
+            
+        layer_idx = current_key
+        
         kwargs = {
             "r": lora_config.r,
             "activate_r": lora_config.activate_r,
+            "epsilon_greedy": lora_config.epsilon_greedy,
+            "rank_partition": lora_config.rank_partition,
             "lora_alpha": lora_config.lora_alpha,
             "lora_dropout": lora_config.lora_dropout,
             "fan_in_fan_out": lora_config.fan_in_fan_out,
             "init_lora_weights": lora_config.init_lora_weights,
             "loaded_in_8bit": getattr(self.model, "is_loaded_in_8bit", False),
             "loaded_in_4bit": getattr(self.model, "is_loaded_in_4bit", False),
+            "layer_idx": layer_idx,
         }
         if (kwargs["loaded_in_8bit"] or kwargs["loaded_in_4bit"]) and not is_bnb_available():
             raise ImportError(
@@ -106,6 +118,8 @@ class SRMoLEModel(LoraModel):
                 adapter_name,
                 lora_config.init_r,
                 lora_config.activate_r,
+                lora_config.epsilon_greedy,
+                lora_config.rank_partition,
                 lora_config.lora_alpha,
                 lora_config.lora_dropout,
                 lora_config.init_lora_weights,
